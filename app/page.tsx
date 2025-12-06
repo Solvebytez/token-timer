@@ -4,6 +4,7 @@ import type React from "react";
 
 import { useState, useEffect } from "react";
 import { useTokenStore } from "@/stores/token-store";
+import { useAuthStore } from "@/stores/auth-store";
 import { tokenDataApi } from "@/lib/api-services";
 import {
   AlertDialog,
@@ -22,6 +23,7 @@ export default function Home() {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [lastSavedTimeSlot, setLastSavedTimeSlot] = useState<string | null>(null);
   const [showCloseWarning, setShowCloseWarning] = useState(false);
+  const [isSavingOnClose, setIsSavingOnClose] = useState(false);
 
   // Zustand store - using direct store access for actions to ensure reactivity
   const entries = useTokenStore((state) => state.entries);
@@ -31,6 +33,49 @@ export default function Home() {
   const getTokenSummary = useTokenStore((state) => state.getTokenSummary);
   const getCounts = useTokenStore((state) => state.getCounts);
   const clearEntries = useTokenStore((state) => state.clearEntries);
+
+  // Check and refresh token on page load if access token is expired
+  useEffect(() => {
+    const checkAndRefreshToken = async () => {
+      const authState = useAuthStore.getState();
+      const { accessToken, refreshToken } = authState;
+      
+      // If access token is missing but refresh token exists, refresh it
+      if (!accessToken && refreshToken) {
+        console.log('🔄 Access token missing on page load, attempting to refresh...');
+        try {
+          const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+          const response = await fetch(`${API_BASE_URL}/refresh`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${refreshToken}`,
+            },
+          });
+          
+          if (response.ok) {
+            const data = await response.json();
+            if (data.success && data.data?.access_token) {
+              // Update both access and refresh tokens (backend now rotates refresh token)
+              const newAccessToken = data.data.access_token;
+              const newRefreshToken = data.data.refresh_token || refreshToken; // Use new if provided, fallback to old
+              useAuthStore.getState().updateTokens(newAccessToken, newRefreshToken);
+              console.log('✅ Token refreshed successfully on page load');
+            }
+          } else {
+            console.error('❌ Token refresh failed on page load');
+            // Refresh failed, clear auth
+            useAuthStore.getState().clearAuth();
+          }
+        } catch (error) {
+          console.error('❌ Error refreshing token on page load:', error);
+          useAuthStore.getState().clearAuth();
+        }
+      }
+    };
+    
+    checkAndRefreshToken();
+  }, []);
 
   // Update clock every second
   useEffect(() => {
@@ -196,6 +241,43 @@ export default function Home() {
     }
   };
 
+  // Manual save function (for "Save Now" button)
+  const handleManualSave = async () => {
+    if (entries.length === 0) {
+      setShowCloseWarning(false);
+      return;
+    }
+
+    // Group entries by time slot and save each
+    const entriesBySlot: Record<string, typeof entries> = {};
+    const slotDates: Record<string, Date> = {};
+    
+    entries.forEach((entry) => {
+      const entryDate = new Date(entry.timestamp);
+      const timeSlot = getTimeSlotForEntry(entry.timestamp);
+      
+      if (timeSlot) {
+        const slotKey = `${entryDate.toISOString().split('T')[0]}_${timeSlot}`;
+        if (!entriesBySlot[slotKey]) {
+          entriesBySlot[slotKey] = [];
+          slotDates[slotKey] = entryDate;
+        }
+        entriesBySlot[slotKey].push(entry);
+      }
+    });
+
+    // Save each slot
+    for (const [slotKey, slotEntries] of Object.entries(entriesBySlot)) {
+      const [dateStr, timeSlot] = slotKey.split('_');
+      const slotDate = slotDates[slotKey];
+      const data = prepareDataForBackend(timeSlot, slotEntries, slotDate);
+      await saveToBackend(data, slotEntries);
+    }
+
+    // Close the warning modal
+    setShowCloseWarning(false);
+  };
+
   // Check and save passed time slots on component mount (browser reopen)
   useEffect(() => {
     const checkAndSavePassedSlots = async () => {
@@ -255,23 +337,185 @@ export default function Home() {
     checkAndSavePassedSlots();
   }, []); // Only run on mount
 
+  // Save data on browser close using navigator.sendBeacon (more reliable than fetch)
+  const saveOnClose = () => {
+    // Prevent duplicate saves if both beforeunload and visibilitychange fire
+    if (isSavingOnClose) {
+      console.log('⏸️ Save already in progress, skipping duplicate call');
+      return;
+    }
+    
+    console.log('🔄 saveOnClose called - attempting to save data on close');
+    setIsSavingOnClose(true);
+    
+    // Get latest entries from store (not from closure)
+    const currentEntries = useTokenStore.getState().entries;
+    console.log('📊 Current entries count:', currentEntries.length);
+    
+    if (currentEntries.length === 0) {
+      console.log('⚠️ No entries to save');
+      setIsSavingOnClose(false);
+      return;
+    }
+
+    const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+    
+    // Get tokens from auth store
+    const authState = useAuthStore.getState();
+    let accessToken = authState.accessToken;
+    const refreshToken = authState.refreshToken;
+    
+    console.log('🔑 Access token present:', accessToken ? 'Yes' : 'No');
+    console.log('🔑 Refresh token present:', refreshToken ? 'Yes' : 'No');
+    
+    // If access token is missing, use refresh token as fallback
+    // The backend should accept refresh tokens for save operations
+    const tokenToUse = accessToken || refreshToken;
+    
+    if (!tokenToUse) {
+      console.error('❌ No access token or refresh token available - cannot save');
+      setIsSavingOnClose(false);
+      return; // No token, can't save
+    }
+    
+    if (!accessToken && refreshToken) {
+      console.log('⚠️ Using refresh token as fallback (access token expired)');
+    }
+
+    try {
+      // Group entries by time slot
+      const entriesBySlot: Record<string, typeof currentEntries> = {};
+      const slotDates: Record<string, Date> = {};
+      
+      currentEntries.forEach((entry) => {
+        const entryDate = new Date(entry.timestamp);
+        const timeSlot = getTimeSlotForEntry(entry.timestamp);
+        
+        if (timeSlot) {
+          const slotKey = `${entryDate.toISOString().split('T')[0]}_${timeSlot}`;
+          if (!entriesBySlot[slotKey]) {
+            entriesBySlot[slotKey] = [];
+            slotDates[slotKey] = entryDate;
+          }
+          entriesBySlot[slotKey].push(entry);
+        }
+      });
+
+      console.log('📦 Grouped entries into', Object.keys(entriesBySlot).length, 'time slots');
+
+      // Collect all entries that we're attempting to save
+      const allEntriesToSave: typeof currentEntries = [];
+      Object.values(entriesBySlot).forEach(slotEntries => {
+        slotEntries.forEach(entry => {
+          if (!allEntriesToSave.some(e => e.timestamp === entry.timestamp)) {
+            allEntriesToSave.push(entry);
+          }
+        });
+      });
+
+      // Save each slot using fetch with keepalive (required for Authorization header)
+      let completedCount = 0;
+      let successCount = 0;
+      const totalSlots = Object.keys(entriesBySlot).length;
+      
+      Object.entries(entriesBySlot).forEach(([slotKey, slotEntries]) => {
+        const [dateStr, timeSlot] = slotKey.split('_');
+        const slotDate = slotDates[slotKey];
+        const data = prepareDataForBackend(timeSlot, slotEntries, slotDate);
+        
+        console.log(`📤 Sending data for slot ${timeSlot} to backend...`);
+        
+        // Use fetch with keepalive - this is the only way to send Authorization header
+        // Note: This must be synchronous (no await) for beforeunload
+        fetch(`${API_BASE_URL}/token-data`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${tokenToUse}`,
+          },
+          body: JSON.stringify(data),
+          keepalive: true, // Critical: allows request to complete after page closes
+        }).then((response) => {
+          console.log(`✅ Fetch response for slot ${timeSlot}:`, response.status, response.statusText);
+          if (response.ok) {
+            // 200 OK (updated) or 201 Created (new) = success
+            successCount++;
+            const action = response.status === 200 ? 'updated' : 'saved';
+            console.log(`✅ Successfully ${action} slot ${timeSlot}`);
+          } else {
+            console.error(`❌ Failed to save slot ${timeSlot}:`, response.status);
+          }
+          
+          completedCount++;
+          // Remove ALL entries from store after all requests complete
+          // Only remove if all saves succeeded (or were already saved - 409)
+          // If any save failed, keep entries so they can be saved on reopen
+          if (completedCount === totalSlots) {
+            if (successCount === totalSlots) {
+              // All saves succeeded - remove all entries
+              const remainingEntries = useTokenStore.getState().entries.filter(
+                (entry) => !allEntriesToSave.some((e) => e.timestamp === entry.timestamp)
+              );
+              useTokenStore.setState({ entries: remainingEntries });
+              console.log(`🗑️ All entries saved successfully - removed ${allEntriesToSave.length} entries from local storage`);
+            } else {
+              // Some saves failed - keep entries for retry on reopen
+              console.log(`⚠️ Some saves failed (${successCount}/${totalSlots} succeeded) - keeping entries for retry on reopen`);
+            }
+            setIsSavingOnClose(false);
+          }
+        }).catch((error) => {
+          console.error(`❌ Fetch error for slot ${timeSlot}:`, error);
+          completedCount++;
+          // Keep entries if there's an error - they'll be saved on reopen
+          if (completedCount === totalSlots) {
+            console.log(`⚠️ Some saves had errors - keeping entries for retry on reopen`);
+            setIsSavingOnClose(false);
+          }
+        });
+      });
+      
+      console.log(`💾 Initiated save requests for ${totalSlots} time slots (${allEntriesToSave.length} total entries)`);
+    } catch (error) {
+      console.error('❌ Error in saveOnClose:', error);
+    }
+  };
+
   // Handle browser close/tab close with warning
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      console.log('🚪 beforeunload event triggered, entries count:', entries.length);
+      
       // Only show warning if there are unsaved entries
       if (entries.length > 0) {
+        console.log('💾 Attempting to save data before close...');
+        // Attempt to save data before closing
+        saveOnClose();
+        
         // Trigger browser default dialog
         e.preventDefault();
         e.returnValue = ''; // Required for Chrome
+      } else {
+        console.log('✅ No unsaved entries, no save needed');
+      }
+    };
+
+    // Also handle visibility change (fires when page becomes hidden)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden' && entries.length > 0) {
+        console.log('👁️ Page hidden - attempting to save data...');
+        saveOnClose();
       }
     };
 
     window.addEventListener('beforeunload', handleBeforeUnload);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [entries.length]);
+  }, [entries]);
 
   // Monitor clock and detect when time slot is reached
   useEffect(() => {
@@ -306,6 +550,24 @@ export default function Home() {
   // Get counts (recalculated on every render to reflect current 15-min window)
   const counts = getCounts();
 
+  // Handle TNO input - only allow numbers 0-9
+  const handleTnoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    // Only allow single digit numbers (0-9)
+    if (value === "" || /^[0-9]$/.test(value)) {
+      setTno(value);
+    }
+  };
+
+  // Handle Quantity input - only allow positive numbers
+  const handleQuantityChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    // Only allow numbers (no decimals, no negative)
+    if (value === "" || /^\d+$/.test(value)) {
+      setQuantity(value);
+    }
+  };
+
   const handleRefresh = () => {
     if (tno === "" || quantity === "") return;
 
@@ -322,6 +584,62 @@ export default function Home() {
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
       handleRefresh();
+    }
+  };
+
+  // Prevent non-numeric keys for TNO input
+  const handleTnoKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Allow: backspace, delete, tab, escape, enter, and arrow keys
+    if (
+      ['Backspace', 'Delete', 'Tab', 'Escape', 'Enter', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)
+    ) {
+      return;
+    }
+    // Allow Ctrl/Cmd + A, C, V, X
+    if ((e.ctrlKey || e.metaKey) && ['a', 'c', 'v', 'x'].includes(e.key.toLowerCase())) {
+      return;
+    }
+    // Only allow numbers 0-9
+    if (!/^[0-9]$/.test(e.key)) {
+      e.preventDefault();
+    }
+  };
+
+  // Prevent non-numeric keys for Quantity input
+  const handleQuantityKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Allow: backspace, delete, tab, escape, enter, and arrow keys
+    if (
+      ['Backspace', 'Delete', 'Tab', 'Escape', 'Enter', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)
+    ) {
+      return;
+    }
+    // Allow Ctrl/Cmd + A, C, V, X
+    if ((e.ctrlKey || e.metaKey) && ['a', 'c', 'v', 'x'].includes(e.key.toLowerCase())) {
+      return;
+    }
+    // Only allow numbers 0-9
+    if (!/^\d$/.test(e.key)) {
+      e.preventDefault();
+    }
+  };
+
+  // Handle paste for TNO - filter to only numbers 0-9
+  const handleTnoPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    const pastedText = e.clipboardData.getData('text');
+    const numericOnly = pastedText.replace(/[^0-9]/g, '').slice(0, 1); // Only first digit
+    if (numericOnly) {
+      setTno(numericOnly);
+    }
+  };
+
+  // Handle paste for Quantity - filter to only numbers
+  const handleQuantityPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    const pastedText = e.clipboardData.getData('text');
+    const numericOnly = pastedText.replace(/[^0-9]/g, ''); // Remove all non-numeric
+    if (numericOnly) {
+      setQuantity(numericOnly);
     }
   };
 
@@ -389,7 +707,7 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6" style={{ minHeight: 0 }}>
           {/* Left Column - Input and Counter */}
           <div className="lg:col-span-2">
             {/* Input Section */}
@@ -402,11 +720,15 @@ export default function Home() {
                   </label>
                   <input
                     type="text"
+                    inputMode="numeric"
                     value={tno}
-                    onChange={(e) => setTno(e.target.value)}
+                    onChange={handleTnoChange}
+                    onKeyDown={handleTnoKeyDown}
                     onKeyPress={handleKeyPress}
+                    onPaste={handleTnoPaste}
                     placeholder="0-9"
                     maxLength={1}
+                    pattern="[0-9]"
                     className="w-full px-4 py-3 bg-white border-3 border-retro-dark text-retro-dark font-bold text-2xl text-center rounded"
                   />
                 </div>
@@ -418,10 +740,14 @@ export default function Home() {
                   </label>
                   <input
                     type="text"
+                    inputMode="numeric"
                     value={quantity}
-                    onChange={(e) => setQuantity(e.target.value)}
+                    onChange={handleQuantityChange}
+                    onKeyDown={handleQuantityKeyDown}
                     onKeyPress={handleKeyPress}
+                    onPaste={handleQuantityPaste}
                     placeholder="0"
+                    pattern="[0-9]*"
                     className="w-full px-4 py-3 bg-white border-3 border-retro-dark text-retro-dark font-bold text-2xl text-center rounded"
                   />
                 </div>
@@ -438,25 +764,52 @@ export default function Home() {
 
             {/* Counter Display */}
             <div className="bg-retro-dark border-4 border-retro-accent p-6 rounded-lg">
-              <div className="grid grid-cols-5 sm:grid-cols-10 gap-2">
+              {/* Green Number Row */}
+              <div className="grid grid-cols-5 sm:grid-cols-10 gap-2 mb-2">
                 {Array.from({ length: 10 }, (_, i) => (
                   <div
                     key={i}
-                    className="flex flex-col items-center gap-2 bg-retro-green border-3 border-retro-accent px-3 sm:px-6 py-4 rounded-lg"
+                    className="flex items-center justify-center bg-retro-green border-3 border-retro-accent px-3 sm:px-6 py-4 rounded-lg"
                   >
                     <div className="text-2xl font-bold text-white">{i}</div>
-                    <div className="bg-white text-retro-dark font-bold text-xl sm:text-2xl px-2 sm:px-4 py-2 rounded min-h-12 flex items-center justify-center w-full">
-                      {counts[i] || 0}
-                    </div>
                   </div>
                 ))}
+              </div>
+              {/* Quantity Boxes Row - Outside green container */}
+              <div className="grid grid-cols-5 sm:grid-cols-10 gap-2">
+                {Array.from({ length: 10 }, (_, i) => {
+                  // Different colors for each number
+                  const colors = [
+                    'text-blue-600',      // 0 - Blue
+                    'text-red-600',       // 1 - Red
+                    'text-green-600',     // 2 - Green
+                    'text-yellow-600',     // 3 - Yellow
+                    'text-purple-600',    // 4 - Purple
+                    'text-pink-600',      // 5 - Pink
+                    'text-orange-600',    // 6 - Orange
+                    'text-indigo-600',    // 7 - Indigo
+                    'text-teal-600',      // 8 - Teal
+                    'text-cyan-600',      // 9 - Cyan
+                  ];
+                  
+                  return (
+                    <div
+                      key={i}
+                      className="bg-white font-bold text-xl sm:text-2xl px-2 sm:px-4 py-2 rounded min-h-12 flex items-center justify-center border-2 border-retro-dark"
+                    >
+                      <span className={colors[i]}>
+                        {counts[i] || 0}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>
 
           {/* Right Column - Tabs */}
           <div className="lg:col-span-1">
-            <div className="bg-retro-cream border-4 border-retro-dark rounded-lg h-full flex flex-col overflow-hidden">
+            <div className="bg-retro-cream border-4 border-retro-dark rounded-lg flex flex-col overflow-hidden" style={{ maxHeight: 'calc(100vh - 200px)', height: '100%' }}>
               <div className="flex border-b-4 border-retro-dark">
                 <button
                   type="button"
@@ -483,7 +836,7 @@ export default function Home() {
               </div>
 
               {/* Tab Content */}
-              <div className="flex-1 overflow-y-auto p-4">
+              <div className="flex-1 overflow-y-auto p-4" style={{ maxHeight: '400px', minHeight: 0 }}>
                 {/* History Tab */}
                 {activeTab === "history" && (
                   <div className="space-y-2">
