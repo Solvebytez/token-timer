@@ -2,7 +2,8 @@
 
 import type React from "react";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
 import { useTokenStore } from "@/stores/token-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { tokenDataApi } from "@/lib/api-services";
@@ -16,14 +17,76 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { ArrowUp, ArrowDown, MoreVertical } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 export default function Home() {
   const [tno, setTno] = useState("");
   const [quantity, setQuantity] = useState("");
   const [currentTime, setCurrentTime] = useState(new Date());
+  
+  // Refs for auto-focus
+  const tnoInputRef = useRef<HTMLInputElement>(null);
+  const quantityInputRef = useRef<HTMLInputElement>(null);
+  
+  // Toast hook
+  const { toast } = useToast();
+  
+  // Router for navigation
+  const router = useRouter();
   const [lastSavedTimeSlot, setLastSavedTimeSlot] = useState<string | null>(null);
   const [showCloseWarning, setShowCloseWarning] = useState(false);
   const [isSavingOnClose, setIsSavingOnClose] = useState(false);
+  
+  // Data table state
+  const [tableData, setTableData] = useState<any[]>([]);
+  const [tableLoading, setTableLoading] = useState(false);
+  const [tablePagination, setTablePagination] = useState({
+    current_page: 1,
+    per_page: 10,
+    total: 0,
+    last_page: 1,
+  });
+  const [tableFilters, setTableFilters] = useState({
+    start_date: '',
+    end_date: '',
+    time_slot: '',
+    page: 1,
+  });
+  const [tableSort, setTableSort] = useState<{
+    column: string | null;
+    direction: 'asc' | 'desc';
+  }>({
+    column: null,
+    direction: 'asc',
+  });
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [recordToDelete, setRecordToDelete] = useState<any>(null);
 
   // Zustand store - using direct store access for actions to ensure reactivity
   const entries = useTokenStore((state) => state.entries);
@@ -96,12 +159,14 @@ export default function Home() {
         slots.push(timeStr);
       }
     }
-    // 11:00 AM
+    // 11:00 AM (only add once)
     slots.push("11:00");
     
-    // 11:00 AM to 9:40 PM - 20 minute intervals
+    // 11:00 AM to 9:40 PM - 20 minute intervals (start from 11:20 to avoid duplicate 11:00)
     for (let hour = 11; hour < 22; hour++) {
-      for (let minute = 0; minute < 60; minute += 20) {
+      // For hour 11, start from minute 20 to avoid duplicate 11:00
+      const startMinute = hour === 11 ? 20 : 0;
+      for (let minute = startMinute; minute < 60; minute += 20) {
         // Stop at 9:40 PM (21:40)
         if (hour === 21 && minute > 40) break;
         const timeStr = `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
@@ -215,7 +280,7 @@ export default function Home() {
   };
 
   // Save data to backend
-  const saveToBackend = async (data: ReturnType<typeof prepareDataForBackend>, entriesToRemove: typeof entries) => {
+  const saveToBackend = async (data: ReturnType<typeof prepareDataForBackend>, entriesToRemove: typeof entries, showToast: boolean = false) => {
     try {
       console.log("📤 Auto-saving data to backend:", data);
       
@@ -229,6 +294,16 @@ export default function Home() {
         );
         useTokenStore.setState({ entries: remainingEntries });
         console.log("🗑️ Saved entries removed from local storage");
+        
+        // Show success toast notification only for auto-save
+        if (showToast) {
+          toast({
+            title: "✅ Auto-save Successful",
+            description: `Data saved for time slot ${data.timeSlot}`,
+            className: "bg-retro-green border-2 border-retro-dark text-white",
+          });
+        }
+        
         return true;
       } else {
         console.error("❌ Failed to save data:", response.message);
@@ -427,17 +502,61 @@ export default function Home() {
         
         // Use fetch with keepalive - this is the only way to send Authorization header
         // Note: This must be synchronous (no await) for beforeunload
-        fetch(`${API_BASE_URL}/token-data`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${tokenToUse}`,
-          },
-          body: JSON.stringify(data),
-          keepalive: true, // Critical: allows request to complete after page closes
-        }).then((response) => {
+        const performSave = (token: string) => {
+          return fetch(`${API_BASE_URL}/token-data`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`,
+            },
+            body: JSON.stringify(data),
+            keepalive: true, // Critical: allows request to complete after page closes
+          });
+        };
+
+        performSave(tokenToUse).then(async (response) => {
           console.log(`✅ Fetch response for slot ${timeSlot}:`, response.status, response.statusText);
-          if (response.ok) {
+          
+          // If 401 and we have refresh token, try to refresh and retry
+          if (response.status === 401 && refreshToken && accessToken) {
+            console.log(`🔄 Got 401, attempting to refresh token for slot ${timeSlot}...`);
+            try {
+              const refreshResponse = await fetch(`${API_BASE_URL}/refresh`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${refreshToken}`,
+                },
+                keepalive: true,
+              });
+
+              if (refreshResponse.ok) {
+                const refreshData = await refreshResponse.json();
+                if (refreshData.success && refreshData.data?.access_token) {
+                  const newAccessToken = refreshData.data.access_token;
+                  // Update token in store
+                  useAuthStore.getState().updateTokens(newAccessToken, refreshData.data.refresh_token || refreshToken);
+                  console.log(`✅ Token refreshed, retrying save for slot ${timeSlot}...`);
+                  
+                  // Retry with new token
+                  const retryResponse = await performSave(newAccessToken);
+                  if (retryResponse.ok) {
+                    successCount++;
+                    const action = retryResponse.status === 200 ? 'updated' : 'saved';
+                    console.log(`✅ Successfully ${action} slot ${timeSlot} after token refresh`);
+                  } else {
+                    console.error(`❌ Retry failed for slot ${timeSlot}:`, retryResponse.status);
+                  }
+                } else {
+                  console.error(`❌ Token refresh failed for slot ${timeSlot}: Invalid response`);
+                }
+              } else {
+                console.error(`❌ Token refresh failed for slot ${timeSlot}:`, refreshResponse.status);
+              }
+            } catch (refreshError) {
+              console.error(`❌ Token refresh error for slot ${timeSlot}:`, refreshError);
+            }
+          } else if (response.ok) {
             // 200 OK (updated) or 201 Created (new) = success
             successCount++;
             const action = response.status === 200 ? 'updated' : 'saved';
@@ -532,7 +651,7 @@ export default function Home() {
           if (entries.length > 0) {
             const entryDate = entries.length > 0 ? new Date(entries[0].timestamp) : new Date();
             const data = prepareDataForBackend(matchedSlot, entries, entryDate);
-            saveToBackend(data, entries);
+            saveToBackend(data, entries, true); // true = show toast for auto-save
             setLastSavedTimeSlot(timeSlotId);
           }
         }
@@ -556,6 +675,10 @@ export default function Home() {
     // Only allow single digit numbers (0-9)
     if (value === "" || /^[0-9]$/.test(value)) {
       setTno(value);
+      // Auto-focus Quantity field when first digit is entered
+      if (value !== "" && /^[0-9]$/.test(value) && quantityInputRef.current) {
+        quantityInputRef.current.focus();
+      }
     }
   };
 
@@ -578,6 +701,10 @@ export default function Home() {
       addEntry(num, qty);
       setTno("");
       setQuantity("");
+      // Reset focus to TNO input after submission
+      if (tnoInputRef.current) {
+        tnoInputRef.current.focus();
+      }
     }
   };
 
@@ -630,6 +757,10 @@ export default function Home() {
     const numericOnly = pastedText.replace(/[^0-9]/g, '').slice(0, 1); // Only first digit
     if (numericOnly) {
       setTno(numericOnly);
+      // Auto-focus Quantity field after pasting a digit
+      if (quantityInputRef.current) {
+        quantityInputRef.current.focus();
+      }
     }
   };
 
@@ -644,6 +775,217 @@ export default function Home() {
   };
 
   const tokenSummary = getTokenSummary();
+
+  // Generate time slot options for filter
+  const timeSlotOptions = generateTimeSlots();
+
+  // Fetch table data
+  useEffect(() => {
+    const fetchTableData = async () => {
+      // Check if user is authenticated before fetching
+      const authState = useAuthStore.getState();
+      const { accessToken, refreshToken } = authState;
+      
+      // Only fetch if we have at least a refresh token
+      if (!accessToken && !refreshToken) {
+        setTableLoading(false);
+        return;
+      }
+
+      setTableLoading(true);
+      try {
+        const params: any = {
+          page: tableFilters.page,
+          per_page: 10,
+        };
+        
+        if (tableFilters.start_date) {
+          params.start_date = tableFilters.start_date;
+        }
+        if (tableFilters.end_date) {
+          params.end_date = tableFilters.end_date;
+        }
+        if (tableFilters.time_slot) {
+          params.time_slot = tableFilters.time_slot;
+        }
+
+        const response = await tokenDataApi.getAll(params);
+        
+        if (response.success && response.data) {
+          setTableData(response.data);
+          if (response.pagination) {
+            setTablePagination(response.pagination);
+          }
+        }
+      } catch (error: any) {
+        console.error('Error fetching table data:', error);
+        // If 401, check if auth was cleared (refresh failed)
+        if (error.response?.status === 401) {
+          const authState = useAuthStore.getState();
+          // If no tokens, redirect to login
+          if (!authState.accessToken && !authState.refreshToken) {
+            console.log('🔄 No tokens available, redirecting to login...');
+            router.push('/login');
+            return;
+          }
+          // Clear table data on auth failure
+          setTableData([]);
+        }
+      } finally {
+        setTableLoading(false);
+      }
+    };
+
+    fetchTableData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tableFilters.page, tableFilters.start_date, tableFilters.end_date, tableFilters.time_slot]);
+
+  const handleFilterChange = (key: string, value: string) => {
+    setTableFilters(prev => ({
+      ...prev,
+      [key]: value,
+      page: 1, // Reset to first page on filter change
+    }));
+  };
+
+  const handlePageChange = (page: number) => {
+    setTableFilters(prev => ({ ...prev, page }));
+  };
+
+  // Handle delete record
+  const handleDeleteClick = (record: any) => {
+    setRecordToDelete(record);
+    setDeleteDialogOpen(true);
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!recordToDelete) return;
+
+    try {
+      const response = await tokenDataApi.delete(recordToDelete.id);
+      
+      if (response.success) {
+        toast({
+          title: "✅ Deleted Successfully",
+          description: `Record for ${recordToDelete.time_slot} on ${new Date(recordToDelete.date).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })} has been deleted`,
+          className: "bg-retro-green border-2 border-retro-dark text-white",
+        });
+        
+        // Refresh table data
+        const params: any = {
+          page: tableFilters.page,
+          per_page: 10,
+        };
+        
+        if (tableFilters.start_date) {
+          params.start_date = tableFilters.start_date;
+        }
+        if (tableFilters.end_date) {
+          params.end_date = tableFilters.end_date;
+        }
+        if (tableFilters.time_slot) {
+          params.time_slot = tableFilters.time_slot;
+        }
+
+        const refreshResponse = await tokenDataApi.getAll(params);
+        
+        if (refreshResponse.success && refreshResponse.data) {
+          setTableData(refreshResponse.data);
+          if (refreshResponse.pagination) {
+            setTablePagination(refreshResponse.pagination);
+          }
+        }
+      } else {
+        toast({
+          title: "❌ Delete Failed",
+          description: response.message || "Failed to delete record",
+          className: "bg-red-500 border-2 border-retro-dark text-white",
+        });
+      }
+    } catch (error: any) {
+      console.error('Error deleting record:', error);
+      toast({
+        title: "❌ Delete Failed",
+        description: error.response?.data?.message || "An error occurred while deleting",
+        className: "bg-red-500 border-2 border-retro-dark text-white",
+      });
+    } finally {
+      setDeleteDialogOpen(false);
+      setRecordToDelete(null);
+    }
+  };
+
+  // Handle column sorting
+  const handleSort = (column: string) => {
+    setTableSort(prev => {
+      if (prev.column === column) {
+        // Toggle direction if same column
+        return {
+          column,
+          direction: prev.direction === 'asc' ? 'desc' : 'asc',
+        };
+      } else {
+        // New column, default to ascending
+        return {
+          column,
+          direction: 'asc',
+        };
+      }
+    });
+  };
+
+  // Sort table data
+  const sortedTableData = [...tableData].sort((a: any, b: any) => {
+    if (!tableSort.column) return 0;
+
+    let aValue: any;
+    let bValue: any;
+
+    switch (tableSort.column) {
+      case 'date':
+        aValue = new Date(a.date).getTime();
+        bValue = new Date(b.date).getTime();
+        break;
+      case 'time_slot':
+        aValue = a.time_slot;
+        bValue = b.time_slot;
+        break;
+      case 'total_entries':
+        aValue = Array.isArray(a.entries) ? a.entries.length : 0;
+        bValue = Array.isArray(b.entries) ? b.entries.length : 0;
+        break;
+      default:
+        // For token number columns (0-9)
+        if (tableSort.column.startsWith('token_')) {
+          const tokenNum = parseInt(tableSort.column.replace('token_', ''));
+          aValue = a.counts?.[tokenNum] || 0;
+          bValue = b.counts?.[tokenNum] || 0;
+        } else {
+          return 0;
+        }
+    }
+
+    if (aValue < bValue) return tableSort.direction === 'asc' ? -1 : 1;
+    if (aValue > bValue) return tableSort.direction === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  // Helper function to render sort icon
+  const renderSortIcon = (column: string) => {
+    if (tableSort.column !== column) {
+      return (
+        <span className="inline-flex flex-col ml-1 opacity-50">
+          <ArrowUp className="h-3 w-3" />
+          <ArrowDown className="h-3 w-3 -mt-1" />
+        </span>
+      );
+    }
+    return tableSort.direction === 'asc' ? (
+      <ArrowUp className="h-4 w-4 ml-1" />
+    ) : (
+      <ArrowDown className="h-4 w-4 ml-1" />
+    );
+  };
 
   return (
     <>
@@ -688,6 +1030,48 @@ export default function Home() {
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent className="bg-retro-cream border-4 border-retro-dark">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-2xl font-bold text-retro-dark">
+              Delete Record
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-retro-dark/80 text-lg">
+              Are you sure you want to delete the record for{" "}
+              <strong>{recordToDelete?.time_slot}</strong> on{" "}
+              <strong>
+                {recordToDelete
+                  ? new Date(recordToDelete.date).toLocaleDateString("en-GB", {
+                      day: "2-digit",
+                      month: "2-digit",
+                      year: "numeric",
+                    })
+                  : ""}
+              </strong>
+              ? This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="gap-3">
+            <AlertDialogCancel
+              onClick={() => {
+                setDeleteDialogOpen(false);
+                setRecordToDelete(null);
+              }}
+              className="bg-retro-accent border-2 border-retro-dark text-retro-dark font-bold hover:bg-opacity-90"
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDeleteConfirm}
+              className="bg-red-500 border-2 border-retro-dark text-white font-bold hover:bg-red-600"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <div className="min-h-screen bg-retro-beige p-4 md:p-8">
       <div className="max-w-7xl mx-auto">
         {/* Header */}
@@ -719,6 +1103,7 @@ export default function Home() {
                     TNO
                   </label>
                   <input
+                    ref={tnoInputRef}
                     type="text"
                     inputMode="numeric"
                     value={tno}
@@ -739,6 +1124,7 @@ export default function Home() {
                     QUANTITY
                   </label>
                   <input
+                    ref={quantityInputRef}
                     type="text"
                     inputMode="numeric"
                     value={quantity}
@@ -822,7 +1208,8 @@ export default function Home() {
                 >
                   HISTORY
                 </button>
-                <button
+                {/* MY TOKENS Tab - Commented out */}
+                {/* <button
                   type="button"
                   onClick={() => handleSetActiveTab("myTokens")}
                   className={`flex-1 font-bold text-center py-3 transition-all ${
@@ -832,7 +1219,7 @@ export default function Home() {
                   }`}
                 >
                   MY TOKENS
-                </button>
+                </button> */}
               </div>
 
               {/* Tab Content */}
@@ -867,8 +1254,8 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* My Tokens Tab */}
-                {activeTab === "myTokens" && (
+                {/* My Tokens Tab - Commented out */}
+                {/* {activeTab === "myTokens" && (
                   <div className="space-y-2">
                     {tokenSummary.length === 0 ? (
                       <p className="text-center text-retro-dark/60 py-8">
@@ -896,9 +1283,268 @@ export default function Home() {
                       ))
                     )}
                   </div>
-                )}
+                )} */}
               </div>
             </div>
+          </div>
+        </div>
+
+        {/* Data Table - Full Width */}
+        <div className="mt-8">
+          <div className="bg-retro-cream border-4 border-retro-dark p-6 rounded-lg">
+            <h2 className="text-2xl font-bold text-retro-dark mb-4">Saved Records</h2>
+            
+            {/* Filters */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+              <div>
+                <label className="block text-sm font-bold text-retro-dark mb-2">Start Date</label>
+                <Input
+                  type="date"
+                  value={tableFilters.start_date}
+                  onChange={(e) => handleFilterChange('start_date', e.target.value)}
+                  className="bg-white border-3 border-retro-dark"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-retro-dark mb-2">End Date</label>
+                <Input
+                  type="date"
+                  value={tableFilters.end_date}
+                  onChange={(e) => handleFilterChange('end_date', e.target.value)}
+                  className="bg-white border-3 border-retro-dark"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-retro-dark mb-2">Time Slot</label>
+                <select
+                  value={tableFilters.time_slot}
+                  onChange={(e) => handleFilterChange('time_slot', e.target.value)}
+                  className="w-full h-9 px-3 bg-white border-3 border-retro-dark rounded-md text-retro-dark font-bold"
+                >
+                  <option value="">All Time Slots</option>
+                  {timeSlotOptions.map((slot) => (
+                    <option key={slot} value={slot}>
+                      {slot}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-end">
+                <Button
+                  onClick={() => setTableFilters({ start_date: '', end_date: '', time_slot: '', page: 1 })}
+                  className="w-full bg-retro-accent border-2 border-retro-dark text-retro-dark font-bold hover:bg-opacity-90"
+                >
+                  Clear Filters
+                </Button>
+              </div>
+            </div>
+
+            {/* Table */}
+            <div className="bg-white border-3 border-retro-dark rounded-lg overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-retro-dark hover:bg-retro-dark">
+                    <TableHead 
+                      className="text-white font-bold cursor-pointer hover:bg-retro-dark/80 transition-colors select-none"
+                      onClick={() => handleSort('date')}
+                    >
+                      <span className="flex items-center">
+                        Date
+                        {renderSortIcon('date')}
+                      </span>
+                    </TableHead>
+                    <TableHead 
+                      className="text-white font-bold cursor-pointer hover:bg-retro-dark/80 transition-colors select-none"
+                      onClick={() => handleSort('time_slot')}
+                    >
+                      <span className="flex items-center">
+                        Time Slot
+                        {renderSortIcon('time_slot')}
+                      </span>
+                    </TableHead>
+                    {Array.from({ length: 10 }, (_, i) => (
+                      <TableHead 
+                        key={i}
+                        className="text-white font-bold text-center cursor-pointer hover:bg-retro-dark/80 transition-colors select-none"
+                        onClick={() => handleSort(`token_${i}`)}
+                      >
+                        <span className="flex items-center justify-center">
+                          {i}
+                          {renderSortIcon(`token_${i}`)}
+                        </span>
+                      </TableHead>
+                    ))}
+                    <TableHead 
+                      className="text-white font-bold text-center cursor-pointer hover:bg-retro-dark/80 transition-colors select-none"
+                      onClick={() => handleSort('total_entries')}
+                    >
+                      <span className="flex items-center justify-center">
+                        Total Entries
+                        {renderSortIcon('total_entries')}
+                      </span>
+                    </TableHead>
+                    <TableHead className="text-white font-bold text-center">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {tableLoading ? (
+                    // Skeleton loader - 10 rows to maintain height
+                    Array.from({ length: 10 }, (_, index) => (
+                      <TableRow key={`skeleton-${index}`} className="hover:bg-retro-cream/50">
+                        <TableCell className="p-2">
+                          <Skeleton className="h-5 w-20 bg-retro-dark/20" />
+                        </TableCell>
+                        <TableCell className="p-2">
+                          <Skeleton className="h-5 w-16 bg-retro-dark/20" />
+                        </TableCell>
+                        {Array.from({ length: 10 }, (_, i) => (
+                          <TableCell key={i} className="p-2 text-center">
+                            <Skeleton className="h-5 w-8 mx-auto bg-retro-dark/20" />
+                          </TableCell>
+                        ))}
+                        <TableCell className="p-2 text-center">
+                          <Skeleton className="h-5 w-12 mx-auto bg-retro-dark/20" />
+                        </TableCell>
+                        <TableCell className="p-2 text-center">
+                          <Skeleton className="h-8 w-16 mx-auto bg-retro-dark/20" />
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  ) : tableData.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={14} className="text-center py-8 text-retro-dark/60">
+                        No records found
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    sortedTableData.map((record: any) => {
+                      const counts = record.counts || {};
+                      const totalEntries = Array.isArray(record.entries) ? record.entries.length : 0;
+                      const colors = [
+                        'text-blue-600', 'text-red-600', 'text-green-600', 'text-yellow-600',
+                        'text-purple-600', 'text-pink-600', 'text-orange-600', 'text-indigo-600',
+                        'text-teal-600', 'text-cyan-600',
+                      ];
+                      
+                      return (
+                        <TableRow key={record.id} className="hover:bg-retro-cream/50">
+                          <TableCell className="font-bold text-retro-dark">
+                            {new Date(record.date).toLocaleDateString('en-GB', {
+                              day: '2-digit',
+                              month: '2-digit',
+                              year: 'numeric'
+                            })}
+                          </TableCell>
+                          <TableCell className="font-bold text-retro-dark">{record.time_slot}</TableCell>
+                          {Array.from({ length: 10 }, (_, i) => (
+                            <TableCell key={i} className="text-center">
+                              <span className={colors[i]}>{counts[i] || 0}</span>
+                            </TableCell>
+                          ))}
+                          <TableCell className="text-center font-bold text-retro-dark">
+                            {totalEntries}
+                          </TableCell>
+                          <TableCell className="text-center">
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 hover:bg-retro-cream/50"
+                                >
+                                  <MoreVertical className="h-4 w-4 text-retro-dark" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent 
+                                align="end"
+                                className="bg-retro-cream border-2 border-retro-dark"
+                              >
+                                <DropdownMenuItem
+                                  onClick={() => {
+                                    // Edit action - can be implemented later
+                                    console.log('Edit record:', record);
+                                    toast({
+                                      title: "Edit",
+                                      description: `Edit functionality for ${record.time_slot} on ${new Date(record.date).toLocaleDateString('en-GB')}`,
+                                    });
+                                  }}
+                                  className="cursor-pointer hover:bg-retro-accent/50 text-retro-dark font-bold"
+                                >
+                                  Edit
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  variant="destructive"
+                                  onClick={() => handleDeleteClick(record)}
+                                  className="cursor-pointer hover:bg-red-500/20 text-red-600 font-bold"
+                                >
+                                  Delete
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+
+            {/* Pagination */}
+            {tablePagination.last_page > 1 && (
+              <div className="mt-4 flex justify-center">
+                <Pagination>
+                  <PaginationContent>
+                    <PaginationItem>
+                      <PaginationPrevious
+                        href="#"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          if (tablePagination.current_page > 1) {
+                            handlePageChange(tablePagination.current_page - 1);
+                          }
+                        }}
+                        className={tablePagination.current_page === 1 ? 'pointer-events-none opacity-50' : ''}
+                      />
+                    </PaginationItem>
+                    {Array.from({ length: tablePagination.last_page }, (_, i) => i + 1).map((page) => (
+                      <PaginationItem key={page}>
+                        <PaginationLink
+                          href="#"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            handlePageChange(page);
+                          }}
+                          isActive={page === tablePagination.current_page}
+                          className="cursor-pointer"
+                        >
+                          {page}
+                        </PaginationLink>
+                      </PaginationItem>
+                    ))}
+                    <PaginationItem>
+                      <PaginationNext
+                        href="#"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          if (tablePagination.current_page < tablePagination.last_page) {
+                            handlePageChange(tablePagination.current_page + 1);
+                          }
+                        }}
+                        className={tablePagination.current_page === tablePagination.last_page ? 'pointer-events-none opacity-50' : ''}
+                      />
+                    </PaginationItem>
+                  </PaginationContent>
+                </Pagination>
+              </div>
+            )}
+
+            {/* Pagination Info */}
+            {tablePagination.total > 0 && (
+              <div className="mt-4 text-center text-sm text-retro-dark/70">
+                Showing {tablePagination.from} to {tablePagination.to} of {tablePagination.total} records
+              </div>
+            )}
           </div>
         </div>
       </div>

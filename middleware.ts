@@ -37,6 +37,17 @@ export async function middleware(request: NextRequest) {
     return pathname.startsWith(route);
   });
 
+  // Debug logging for protected routes
+  if (isProtectedRoute) {
+    console.log("🔍 Middleware Debug:", {
+      pathname,
+      hasAuthToken: !!authToken,
+      hasRefreshToken: !!refreshToken,
+      authTokenLength: authToken?.length || 0,
+      refreshTokenLength: refreshToken?.length || 0,
+    });
+  }
+
   // 1. Handle auth routes - redirect if already authenticated (server-side, no flash)
   if (isAuthRoute && (authToken || refreshToken)) {
     console.log("🔐 Auth route detected with token, validating...");
@@ -155,9 +166,75 @@ export async function middleware(request: NextRequest) {
       return NextResponse.redirect(url);
     }
 
-    // If access token expired but refresh token exists, try to refresh
-    if (!authToken && refreshToken) {
-      console.log("🔄 Access token missing, attempting to refresh...");
+    // Validate access token if it exists, or refresh if missing/expired
+    let shouldRefresh = false;
+    let newAccessToken: string | undefined = undefined;
+    let newRefreshToken: string | undefined = undefined;
+
+    // If we have an access token, validate it first
+    if (authToken) {
+      try {
+        const apiUrl =
+          process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+
+        const validateResponse = await fetch(`${apiUrl}/me`, {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${authToken}`,
+          },
+        });
+
+        if (validateResponse.ok) {
+          // Access token is valid, allow request to proceed
+          console.log("✅ Access token is valid");
+          return NextResponse.next();
+        } else if (validateResponse.status === 401 && refreshToken) {
+          // Access token expired, need to refresh
+          console.log("🔄 Access token expired, attempting to refresh...");
+          shouldRefresh = true;
+        } else {
+          // Token invalid for other reasons, try refresh if available
+          if (refreshToken) {
+            console.log("🔄 Access token invalid, attempting to refresh...");
+            shouldRefresh = true;
+          } else {
+            // No refresh token, redirect to login
+            console.log("❌ Access token invalid and no refresh token");
+            const url = request.nextUrl.clone();
+            url.pathname = "/login";
+            const response = NextResponse.redirect(url);
+            response.cookies.delete("auth_token");
+            response.cookies.delete("refresh_token");
+            return response;
+          }
+        }
+      } catch (error) {
+        console.error("💥 Error validating access token:", error);
+        // On error, try refresh if available
+        if (refreshToken) {
+          shouldRefresh = true;
+        } else {
+          const url = request.nextUrl.clone();
+          url.pathname = "/login";
+          const response = NextResponse.redirect(url);
+          response.cookies.delete("auth_token");
+          response.cookies.delete("refresh_token");
+          return response;
+        }
+      }
+    } else {
+      // No access token, try to refresh if refresh token exists
+      shouldRefresh = true;
+    }
+
+    // If access token is missing or expired, try to refresh
+    if (shouldRefresh && refreshToken) {
+      console.log("🔄 Access token missing/expired, attempting to refresh...");
+      console.log(
+        "🔑 Refresh token preview:",
+        refreshToken.substring(0, 20) + "..."
+      );
 
       try {
         const apiUrl =
@@ -171,22 +248,31 @@ export async function middleware(request: NextRequest) {
           },
         });
 
+        console.log("🔄 Refresh response status:", refreshResponse.status);
+
         if (refreshResponse.ok) {
           const refreshData = await refreshResponse.json();
+          console.log(
+            "🔄 Refresh response data:",
+            JSON.stringify(refreshData).substring(0, 200)
+          );
+
           if (refreshData.success && refreshData.data?.access_token) {
-            const newAccessToken = refreshData.data.access_token;
-            const newRefreshToken = refreshData.data?.refresh_token;
+            newAccessToken = refreshData.data.access_token;
+            newRefreshToken = refreshData.data?.refresh_token;
             console.log("✅ Token refreshed successfully in middleware");
 
             // Set new access token in cookie and allow request to proceed
             const response = NextResponse.next();
             const expires = new Date();
             expires.setMinutes(expires.getMinutes() + 15);
-            response.cookies.set("auth_token", newAccessToken, {
-              expires: expires,
-              path: "/",
-              sameSite: "lax",
-            });
+            if (newAccessToken) {
+              response.cookies.set("auth_token", newAccessToken, {
+                expires: expires,
+                path: "/",
+                sameSite: "lax",
+              });
+            }
 
             // Update refresh token if provided (token rotation)
             if (newRefreshToken) {
@@ -200,7 +286,17 @@ export async function middleware(request: NextRequest) {
             }
 
             return response;
+          } else {
+            console.log("❌ Invalid refresh response structure:", refreshData);
           }
+        } else {
+          const errorData = await refreshResponse.json().catch(() => ({}));
+          console.log(
+            "❌ Refresh failed with status:",
+            refreshResponse.status,
+            "Error:",
+            JSON.stringify(errorData).substring(0, 200)
+          );
         }
 
         // Refresh failed, redirect to login
@@ -221,6 +317,17 @@ export async function middleware(request: NextRequest) {
         response.cookies.delete("refresh_token");
         return response;
       }
+    }
+
+    // If we have neither valid access token nor refresh token, redirect to login
+    if (!shouldRefresh && !authToken && !refreshToken) {
+      console.log("❌ No valid tokens, redirecting to login");
+      const url = request.nextUrl.clone();
+      url.pathname = "/login";
+      const response = NextResponse.redirect(url);
+      response.cookies.delete("auth_token");
+      response.cookies.delete("refresh_token");
+      return response;
     }
   }
 

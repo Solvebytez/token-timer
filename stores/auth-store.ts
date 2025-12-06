@@ -37,11 +37,27 @@ function setAuthCookie(token: string) {
 }
 
 /**
- * Clear auth cookie
+ * Set refresh token cookie for middleware
+ */
+function setRefreshTokenCookie(token: string) {
+  if (typeof document !== "undefined") {
+    // Set cookie with 30 days expiration (matches refresh token TTL)
+    const expires = new Date();
+    expires.setDate(expires.getDate() + 30);
+    // Use secure cookie in production, SameSite=Lax for CSRF protection
+    const isProduction = process.env.NODE_ENV === 'production';
+    const secureFlag = isProduction ? '; Secure' : '';
+    document.cookie = `refresh_token=${token}; expires=${expires.toUTCString()}; path=/; SameSite=Lax${secureFlag}`;
+  }
+}
+
+/**
+ * Clear auth cookies
  */
 function clearAuthCookie() {
   if (typeof document !== "undefined") {
     document.cookie = "auth_token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+    document.cookie = "refresh_token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
   }
 }
 
@@ -57,6 +73,7 @@ export const useAuthStore = create<AuthState>()(
       // Set authentication data
       setAuth: (user: User, accessToken: string, refreshToken: string) => {
         setAuthCookie(accessToken);
+        setRefreshTokenCookie(refreshToken);
         set({
           user,
           accessToken,
@@ -79,6 +96,10 @@ export const useAuthStore = create<AuthState>()(
       // Update tokens (for refresh)
       updateTokens: (accessToken: string, refreshToken?: string) => {
         setAuthCookie(accessToken);
+        // Update refresh token cookie if new refresh token is provided
+        if (refreshToken) {
+          setRefreshTokenCookie(refreshToken);
+        }
         set((state) => ({
           accessToken,
           refreshToken: refreshToken || state.refreshToken,

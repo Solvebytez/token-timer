@@ -136,5 +136,29 @@ export const tokenDataApi = {
     });
     return response.data;
   },
+
+  /**
+   * Get all token data with pagination and filters
+   */
+  getAll: async (params?: {
+    page?: number;
+    per_page?: number;
+    start_date?: string;
+    end_date?: string;
+    time_slot?: string;
+  }): Promise<ApiResponse> => {
+    const response: AxiosResponse<ApiResponse> = await apiClient.get('/token-data', {
+      params,
+    });
+    return response.data;
+  },
+
+  /**
+   * Delete token data by ID
+   */
+  delete: async (id: number): Promise<ApiResponse> => {
+    const response: AxiosResponse<ApiResponse> = await apiClient.delete(`/token-data/${id}`);
+    return response.data;
+  },
 };
 

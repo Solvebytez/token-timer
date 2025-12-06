@@ -65,20 +65,39 @@ apiClient.interceptors.response.use(
           },
         });
 
-        const { access_token, refresh_token } = response.data.data;
-        
-        // Update tokens in store
-        useAuthStore.getState().updateTokens(access_token, refresh_token);
+        // Handle response structure
+        if (response.data.success && response.data.data) {
+          const { access_token, refresh_token } = response.data.data;
+          
+          if (!access_token) {
+            throw new Error('No access token in refresh response');
+          }
+          
+          // Update tokens in store
+          useAuthStore.getState().updateTokens(access_token, refresh_token || refreshToken);
 
-        // Retry original request with new token
-        if (originalRequest.headers) {
-          originalRequest.headers.Authorization = `Bearer ${access_token}`;
+          // Retry original request with new token
+          if (originalRequest.headers) {
+            originalRequest.headers.Authorization = `Bearer ${access_token}`;
+          }
+          
+          return apiClient(originalRequest);
+        } else {
+          throw new Error('Invalid refresh response structure');
+        }
+      } catch (refreshError: any) {
+        // Refresh failed, clear auth
+        console.error('❌ Token refresh failed in interceptor:', refreshError);
+        useAuthStore.getState().clearAuth();
+        
+        // If we're in the browser, redirect to login
+        if (typeof window !== 'undefined') {
+          // Only redirect if not already on login page
+          if (!window.location.pathname.includes('/login')) {
+            window.location.href = '/login';
+          }
         }
         
-        return apiClient(originalRequest);
-      } catch (refreshError) {
-        // Refresh failed, clear auth
-        useAuthStore.getState().clearAuth();
         return Promise.reject(refreshError);
       }
     }
