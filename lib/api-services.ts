@@ -154,6 +154,14 @@ export const tokenDataApi = {
   },
 
   /**
+   * Update token data by ID
+   */
+  update: async (id: number, data: { entries: Array<{ number: number; quantity: number; timestamp: number }> }): Promise<ApiResponse> => {
+    const response: AxiosResponse<ApiResponse> = await apiClient.put(`/token-data/${id}`, data);
+    return response.data;
+  },
+
+  /**
    * Delete token data by ID
    */
   delete: async (id: number): Promise<ApiResponse> => {

@@ -36,14 +36,17 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ArrowUp, ArrowDown, MoreVertical } from "lucide-react";
+import { ArrowUp, ArrowDown, MoreVertical, LogOut } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { authApi } from "@/lib/api-services";
 
 export default function Home() {
   const [tno, setTno] = useState("");
@@ -87,6 +90,13 @@ export default function Home() {
   });
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [recordToDelete, setRecordToDelete] = useState<any>(null);
+  
+  // Edit mode state
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [editingRecordId, setEditingRecordId] = useState<number | null>(null);
+  const [editingRecordDate, setEditingRecordDate] = useState<string | null>(null);
+  const [editingRecordTimeSlot, setEditingRecordTimeSlot] = useState<string | null>(null);
+  const [editingRecordCounts, setEditingRecordCounts] = useState<Record<number, number> | null>(null);
 
   // Zustand store - using direct store access for actions to ensure reactivity
   const entries = useTokenStore((state) => state.entries);
@@ -96,6 +106,10 @@ export default function Home() {
   const getTokenSummary = useTokenStore((state) => state.getTokenSummary);
   const getCounts = useTokenStore((state) => state.getCounts);
   const clearEntries = useTokenStore((state) => state.clearEntries);
+  
+  // Auth store
+  const user = useAuthStore((state) => state.user);
+  const clearAuth = useAuthStore((state) => state.clearAuth);
 
   // Check and refresh token on page load if access token is expired
   useEffect(() => {
@@ -666,8 +680,129 @@ export default function Home() {
     setActiveTab(tab);
   };
 
-  // Get counts (recalculated on every render to reflect current 15-min window)
-  const counts = getCounts();
+  // Get counts - in edit mode, calculate from all entries; otherwise use 15-min window
+  const counts = isEditMode 
+    ? (() => {
+        // In edit mode, calculate counts from ALL entries (no time filter)
+        const allEntries = useTokenStore.getState().entries;
+        const editCounts: Record<number, number> = {};
+        for (let i = 0; i < 10; i++) {
+          editCounts[i] = 0;
+        }
+        allEntries.forEach((entry) => {
+          editCounts[entry.number] = (editCounts[entry.number] || 0) + entry.quantity;
+        });
+        return editCounts;
+      })()
+    : getCounts();
+
+  // Handle Edit Click - Load record's entries into form
+  const handleEditClick = (record: any) => {
+    console.log("✏️ Edit clicked for record:", record);
+    
+    // Set edit mode state
+    setIsEditMode(true);
+    setEditingRecordId(record.id);
+    setEditingRecordDate(record.date);
+    setEditingRecordTimeSlot(record.time_slot);
+    
+    // Store original counts from record
+    if (record.counts && typeof record.counts === 'object') {
+      setEditingRecordCounts(record.counts);
+    }
+    
+    // Load record's entries into Zustand store
+    if (record.entries && Array.isArray(record.entries)) {
+      // Convert entries to the format expected by the store
+      const formattedEntries = record.entries.map((entry: any) => ({
+        number: entry.number,
+        quantity: entry.quantity,
+        timestamp: entry.timestamp || Date.now(), // Preserve original timestamp or use current
+      }));
+      
+      // Replace all entries in store with record's entries
+      useTokenStore.setState({ entries: formattedEntries });
+      console.log("✅ Loaded entries into store:", formattedEntries.length);
+      console.log("✅ Record counts:", record.counts);
+    }
+    
+    // Clear input fields
+    setTno("");
+    setQuantity("");
+    
+    // Scroll to form (optional)
+    if (tnoInputRef.current) {
+      tnoInputRef.current.focus();
+    }
+  };
+
+  // Handle Cancel Edit - Exit edit mode
+  const handleCancelEdit = () => {
+    setIsEditMode(false);
+    setEditingRecordId(null);
+    setEditingRecordDate(null);
+    setEditingRecordTimeSlot(null);
+    setEditingRecordCounts(null);
+    clearEntries();
+    setTno("");
+    setQuantity("");
+    
+    toast({
+      title: "Edit Cancelled",
+      description: "Changes discarded",
+      className: "bg-retro-accent border-2 border-retro-dark text-retro-dark",
+    });
+  };
+
+  // Handle Logout
+  const handleLogout = async () => {
+    try {
+      const response = await authApi.logout();
+      
+      if (response.success) {
+        // Clear auth state
+        clearAuth();
+        // Clear token entries
+        clearEntries();
+        // Redirect to login
+        router.push('/login');
+        
+        toast({
+          title: "Logged Out",
+          description: "You have been successfully logged out",
+          className: "bg-retro-green border-2 border-retro-dark text-white",
+        });
+      } else {
+        toast({
+          title: "Logout Failed",
+          description: response.message || "Failed to logout",
+          variant: "destructive",
+        });
+      }
+    } catch (error: any) {
+      console.error("❌ Error logging out:", error);
+      // Even if logout fails, clear local auth and redirect
+      clearAuth();
+      clearEntries();
+      router.push('/login');
+      
+      toast({
+        title: "Logged Out",
+        description: "You have been logged out",
+        className: "bg-retro-green border-2 border-retro-dark text-white",
+      });
+    }
+  };
+
+  // Get user initials (first 2 letters of name)
+  const getUserInitials = (name: string): string => {
+    if (!name) return "U";
+    const words = name.trim().split(/\s+/);
+    if (words.length >= 2) {
+      return (words[0][0] + words[1][0]).toUpperCase().slice(0, 2);
+    }
+    return name.substring(0, 2).toUpperCase();
+  };
 
   // Handle TNO input - only allow numbers 0-9
   const handleTnoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -691,19 +826,82 @@ export default function Home() {
     }
   };
 
-  const handleRefresh = () => {
+  const handleRefresh = async () => {
     if (tno === "" || quantity === "") return;
 
     const num = Number.parseInt(tno);
     const qty = Number.parseInt(quantity);
 
     if (num >= 0 && num <= 9 && qty > 0) {
-      addEntry(num, qty);
-      setTno("");
-      setQuantity("");
-      // Reset focus to TNO input after submission
-      if (tnoInputRef.current) {
-        tnoInputRef.current.focus();
+      // If in edit mode, update the record
+      if (isEditMode && editingRecordId) {
+        // Add the new entry to the store first
+        addEntry(num, qty);
+        setTno("");
+        setQuantity("");
+        
+        // Get all current entries (including the one just added)
+        const currentEntries = useTokenStore.getState().entries;
+        
+        // Update the record via API
+        try {
+          const response = await tokenDataApi.update(editingRecordId, {
+            entries: currentEntries,
+          });
+          
+          if (response.success) {
+            toast({
+              title: "✅ Record Updated",
+              description: `Entry added and record updated successfully`,
+              className: "bg-retro-green border-2 border-retro-dark text-white",
+            });
+            
+            // Refresh table data
+            fetchTableData();
+            
+            // Exit edit mode and clear entries (recommended approach)
+            setIsEditMode(false);
+            setEditingRecordId(null);
+            setEditingRecordDate(null);
+            setEditingRecordTimeSlot(null);
+            setEditingRecordCounts(null);
+            clearEntries();
+            
+            // Reset focus to TNO input
+            if (tnoInputRef.current) {
+              tnoInputRef.current.focus();
+            }
+          } else {
+            toast({
+              title: "❌ Update Failed",
+              description: response.message || "Failed to update record",
+              variant: "destructive",
+            });
+            // Remove the entry we just added if update failed
+            const updatedEntries = currentEntries.slice(0, -1);
+            useTokenStore.setState({ entries: updatedEntries });
+          }
+        } catch (error: any) {
+          console.error("❌ Error updating record:", error);
+          toast({
+            title: "❌ Update Failed",
+            description: error.message || "Failed to update record",
+            variant: "destructive",
+          });
+          // Remove the entry we just added if update failed
+          const currentEntriesAfterError = useTokenStore.getState().entries;
+          const updatedEntries = currentEntriesAfterError.slice(0, -1);
+          useTokenStore.setState({ entries: updatedEntries });
+        }
+      } else {
+        // Normal mode: just add entry
+        addEntry(num, qty);
+        setTno("");
+        setQuantity("");
+        // Reset focus to TNO input after submission
+        if (tnoInputRef.current) {
+          tnoInputRef.current.focus();
+        }
       }
     }
   };
@@ -779,63 +977,64 @@ export default function Home() {
   // Generate time slot options for filter
   const timeSlotOptions = generateTimeSlots();
 
-  // Fetch table data
-  useEffect(() => {
-    const fetchTableData = async () => {
-      // Check if user is authenticated before fetching
-      const authState = useAuthStore.getState();
-      const { accessToken, refreshToken } = authState;
+  // Fetch table data function (moved outside useEffect to be accessible)
+  const fetchTableData = async () => {
+    // Check if user is authenticated before fetching
+    const authState = useAuthStore.getState();
+    const { accessToken, refreshToken } = authState;
+    
+    // Only fetch if we have at least a refresh token
+    if (!accessToken && !refreshToken) {
+      setTableLoading(false);
+      return;
+    }
+
+    setTableLoading(true);
+    try {
+      const params: any = {
+        page: tableFilters.page,
+        per_page: 10,
+      };
       
-      // Only fetch if we have at least a refresh token
-      if (!accessToken && !refreshToken) {
-        setTableLoading(false);
-        return;
+      if (tableFilters.start_date) {
+        params.start_date = tableFilters.start_date;
+      }
+      if (tableFilters.end_date) {
+        params.end_date = tableFilters.end_date;
+      }
+      if (tableFilters.time_slot) {
+        params.time_slot = tableFilters.time_slot;
       }
 
-      setTableLoading(true);
-      try {
-        const params: any = {
-          page: tableFilters.page,
-          per_page: 10,
-        };
-        
-        if (tableFilters.start_date) {
-          params.start_date = tableFilters.start_date;
+      const response = await tokenDataApi.getAll(params);
+      
+      if (response.success && response.data) {
+        setTableData(response.data);
+        if (response.pagination) {
+          setTablePagination(response.pagination);
         }
-        if (tableFilters.end_date) {
-          params.end_date = tableFilters.end_date;
-        }
-        if (tableFilters.time_slot) {
-          params.time_slot = tableFilters.time_slot;
-        }
-
-        const response = await tokenDataApi.getAll(params);
-        
-        if (response.success && response.data) {
-          setTableData(response.data);
-          if (response.pagination) {
-            setTablePagination(response.pagination);
-          }
-        }
-      } catch (error: any) {
-        console.error('Error fetching table data:', error);
-        // If 401, check if auth was cleared (refresh failed)
-        if (error.response?.status === 401) {
-          const authState = useAuthStore.getState();
-          // If no tokens, redirect to login
-          if (!authState.accessToken && !authState.refreshToken) {
-            console.log('🔄 No tokens available, redirecting to login...');
-            router.push('/login');
-            return;
-          }
-          // Clear table data on auth failure
-          setTableData([]);
-        }
-      } finally {
-        setTableLoading(false);
       }
-    };
+    } catch (error: any) {
+      console.error('Error fetching table data:', error);
+      // If 401, check if auth was cleared (refresh failed)
+      if (error.response?.status === 401) {
+        const authState = useAuthStore.getState();
+        // If no tokens, redirect to login
+        if (!authState.accessToken && !authState.refreshToken) {
+          console.log('🔄 No tokens available, redirecting to login...');
+          router.push('/login');
+          return;
+        }
+        // Clear table data on auth failure
+        setTableData([]);
+      }
+    } finally {
+      setTableLoading(false);
+    }
+  };
 
+  // Fetch table data on mount and when filters change
+  useEffect(() => {
     fetchTableData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tableFilters.page, tableFilters.start_date, tableFilters.end_date, tableFilters.time_slot]);
@@ -1084,16 +1283,68 @@ export default function Home() {
               Track token frequency over 15 minutes
             </p>
           </div>
-          <div className="text-right">
+          <div className="text-right flex items-center gap-4">
             <div className="text-3xl font-bold text-retro-dark font-mono">
               {currentTime.toLocaleTimeString()}
             </div>
+            
+            {/* User Profile */}
+            {user && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="flex items-center gap-3 hover:opacity-80 transition-all cursor-pointer">
+                    <Avatar className="h-10 w-10 border-2 border-retro-dark">
+                      <AvatarFallback className="bg-retro-accent text-retro-dark font-bold text-sm">
+                        {getUserInitials(user.name)}
+                      </AvatarFallback>
+                    </Avatar>
+                    <span className="font-bold text-retro-dark text-lg hidden sm:block">
+                      {user.name}
+                    </span>
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent 
+                  align="end"
+                  className="bg-retro-cream border-2 border-retro-dark w-56"
+                >
+                  <div className="px-3 py-2">
+                    <p className="text-sm font-medium text-retro-dark">{user.name}</p>
+                    <p className="text-xs text-retro-dark/60 truncate">{user.email}</p>
+                  </div>
+                  <DropdownMenuSeparator className="bg-retro-dark/20" />
+                  <DropdownMenuItem
+                    onClick={handleLogout}
+                    className="cursor-pointer hover:bg-red-500/20 text-red-600 font-bold focus:bg-red-500/20 focus:text-red-600"
+                  >
+                    <LogOut className="mr-2 h-4 w-4" />
+                    Logout
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6" style={{ minHeight: 0 }}>
           {/* Left Column - Input and Counter */}
           <div className="lg:col-span-2">
+            {/* Edit Mode Banner */}
+            {isEditMode && (
+              <div className="bg-retro-accent border-4 border-retro-dark p-4 mb-4 rounded-lg flex justify-between items-center">
+                <div>
+                  <span className="font-bold text-retro-dark text-lg">
+                    ✏️ Editing: {editingRecordDate ? new Date(editingRecordDate).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' }) : ''} - {editingRecordTimeSlot || ''}
+                  </span>
+                </div>
+                <button
+                  onClick={handleCancelEdit}
+                  className="bg-retro-dark text-white font-bold px-4 py-2 rounded-lg hover:bg-opacity-90 transition-all"
+                >
+                  Cancel Edit
+                </button>
+              </div>
+            )}
+            
             {/* Input Section */}
             <div className="bg-retro-cream border-4 border-retro-dark p-6 mb-8 rounded-lg">
               <div className="grid grid-cols-2 gap-4 mb-6">
@@ -1139,12 +1390,12 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Refresh Button */}
+              {/* Refresh/Update Button */}
               <button
                 onClick={handleRefresh}
                 className="w-full bg-retro-accent border-4 border-retro-dark text-retro-dark font-bold text-lg py-3 rounded-lg hover:bg-opacity-90 transition-all active:scale-95"
               >
-                REFRESH
+                {isEditMode ? "UPDATE" : "REFRESH"}
               </button>
             </div>
 
@@ -1195,8 +1446,8 @@ export default function Home() {
 
           {/* Right Column - Tabs */}
           <div className="lg:col-span-1">
-            <div className="bg-retro-cream border-4 border-retro-dark rounded-lg flex flex-col overflow-hidden" style={{ maxHeight: 'calc(100vh - 200px)', height: '100%' }}>
-              <div className="flex border-b-4 border-retro-dark">
+            <div className="bg-retro-cream border-4 border-retro-dark rounded-lg flex flex-col overflow-hidden" style={{ height: '450px' }}>
+              <div className="flex border-b-4 border-retro-dark flex-shrink-0">
                 <button
                   type="button"
                   onClick={() => handleSetActiveTab("history")}
@@ -1223,12 +1474,12 @@ export default function Home() {
               </div>
 
               {/* Tab Content */}
-              <div className="flex-1 overflow-y-auto p-4" style={{ maxHeight: '400px', minHeight: 0 }}>
+              <div className="flex-1 overflow-y-auto p-4" style={{ minHeight: 0, height: '100%' }}>
                 {/* History Tab */}
                 {activeTab === "history" && (
-                  <div className="space-y-2">
+                  <div className="space-y-2 h-full flex flex-col">
                     {entries.length === 0 ? (
-                      <p className="text-center text-retro-dark/60 py-8">
+                      <p className="text-center text-retro-dark/60 py-8 flex-1 flex items-center justify-center">
                         No entries yet
                       </p>
                     ) : (
@@ -1460,14 +1711,7 @@ export default function Home() {
                                 className="bg-retro-cream border-2 border-retro-dark"
                               >
                                 <DropdownMenuItem
-                                  onClick={() => {
-                                    // Edit action - can be implemented later
-                                    console.log('Edit record:', record);
-                                    toast({
-                                      title: "Edit",
-                                      description: `Edit functionality for ${record.time_slot} on ${new Date(record.date).toLocaleDateString('en-GB')}`,
-                                    });
-                                  }}
+                                  onClick={() => handleEditClick(record)}
                                   className="cursor-pointer hover:bg-retro-accent/50 text-retro-dark font-bold"
                                 >
                                   Edit
