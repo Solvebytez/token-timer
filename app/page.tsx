@@ -2,7 +2,7 @@
 
 import type React from "react";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useTokenStore } from "@/stores/token-store";
 
 export default function Home() {
@@ -17,12 +17,10 @@ export default function Home() {
   const getTokenSummary = useTokenStore((state) => state.getTokenSummary);
   const getCounts = useTokenStore((state) => state.getCounts);
 
-  // Handle tab change with proper store update
+  // Handle tab change
   const handleSetActiveTab = (tab: "history" | "myTokens") => {
     setActiveTab(tab);
   };
-
-
 
   // Get counts (recalculated on every render to reflect current 15-min window)
   const counts = getCounts();
@@ -47,20 +45,6 @@ export default function Home() {
   };
 
   const tokenSummary = getTokenSummary();
-
-  // Different colors for each number (0-9)
-  const numberColors = [
-    "text-red-600",      // 0 - Red
-    "text-blue-600",     // 1 - Blue
-    "text-green-600",    // 2 - Green
-    "text-yellow-600",   // 3 - Yellow
-    "text-purple-600",   // 4 - Purple
-    "text-pink-600",     // 5 - Pink
-    "text-orange-600",   // 6 - Orange
-    "text-teal-600",     // 7 - Teal
-    "text-indigo-600",   // 8 - Indigo
-    "text-cyan-600",     // 9 - Cyan
-  ];
 
   return (
     <div className="min-h-screen bg-retro-beige p-4 md:p-8">
@@ -131,7 +115,7 @@ export default function Home() {
                     className="flex flex-col items-center gap-2 bg-retro-green border-3 border-retro-accent px-3 sm:px-6 py-4 rounded-lg"
                   >
                     <div className="text-2xl font-bold text-white">{i}</div>
-                    <div className={`bg-white ${numberColors[i]} font-bold text-xl sm:text-2xl px-2 sm:px-4 py-2 rounded min-h-12 flex items-center justify-center w-full`}>
+                    <div className="bg-white text-retro-dark font-bold text-xl sm:text-2xl px-2 sm:px-4 py-2 rounded min-h-12 flex items-center justify-center w-full">
                       {counts[i] || 0}
                     </div>
                   </div>
@@ -143,23 +127,10 @@ export default function Home() {
           {/* Right Column - Tabs */}
           <div className="lg:col-span-1">
             <div className="bg-retro-cream border-4 border-retro-dark rounded-lg h-full flex flex-col overflow-hidden">
-              <div
-                className="flex border-b-4 border-retro-dark"
-                style={{ position: "relative", zIndex: 10 }}
-              >
+              <div className="flex border-b-4 border-retro-dark">
                 <button
                   type="button"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    handleSetActiveTab("history");
-                  }}
-                  style={{
-                    pointerEvents: "auto",
-                    cursor: "pointer",
-                    position: "relative",
-                    zIndex: 11,
-                  }}
+                  onClick={() => handleSetActiveTab("history")}
                   className={`flex-1 font-bold text-center py-3 border-r-2 border-retro-dark transition-all ${
                     activeTab === "history"
                       ? "bg-retro-accent text-retro-dark"
@@ -170,17 +141,7 @@ export default function Home() {
                 </button>
                 <button
                   type="button"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    handleSetActiveTab("myTokens");
-                  }}
-                  style={{
-                    pointerEvents: "auto",
-                    cursor: "pointer",
-                    position: "relative",
-                    zIndex: 11,
-                  }}
+                  onClick={() => handleSetActiveTab("myTokens")}
                   className={`flex-1 font-bold text-center py-3 transition-all ${
                     activeTab === "myTokens"
                       ? "bg-retro-accent text-retro-dark"
