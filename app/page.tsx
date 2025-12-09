@@ -1876,16 +1876,16 @@ export default function Home() {
                       
                       return (
                         <TableRow key={record.id} className={`hover:bg-retro-cream/50 ${isEditing ? 'bg-retro-accent/20' : ''}`}>
-                          <TableCell className="font-bold text-retro-dark">
+                          <TableCell className="font-bold text-retro-dark text-base">
                             {new Date(record.date).toLocaleDateString('en-GB', {
                               day: '2-digit',
                               month: '2-digit',
                               year: 'numeric'
                             })}
                           </TableCell>
-                          <TableCell className="font-bold text-retro-dark">{record.time_slot}</TableCell>
+                          <TableCell className="font-bold text-retro-dark text-base">{record.time_slot}</TableCell>
                           {Array.from({ length: 10 }, (_, i) => (
-                            <TableCell key={i} className="text-center">
+                            <TableCell key={i} className="text-center text-base">
                               {isEditing ? (
                                 <Input
                                   type="text"
@@ -1908,20 +1908,20 @@ export default function Home() {
                                       e.preventDefault();
                                     }
                                   }}
-                                  className="w-16 text-center font-bold border-2 border-retro-dark"
+                                  className="w-16 text-center font-bold border-2 border-retro-dark text-base"
                                   style={{ padding: '4px 8px' }}
                                 />
                               ) : (
-                                <span className={colors[i]}>
+                                <span className={`${colors[i]} text-base`}>
                                   {showHalfQuantity ? Math.floor((counts[i] || 0) / 2) : (counts[i] || 0)}
                                 </span>
                               )}
                             </TableCell>
                           ))}
-                          <TableCell className="text-center font-bold text-retro-dark">
+                          <TableCell className="text-center font-bold text-retro-dark text-base">
                             {totalEntries}
                           </TableCell>
-                          <TableCell className="text-center">
+                          <TableCell className="text-center text-base">
                             {isEditing ? (
                               <div className="flex flex-col gap-2 items-center">
                                 <Button
