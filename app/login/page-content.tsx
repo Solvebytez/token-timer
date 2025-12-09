@@ -21,7 +21,13 @@ export default function LoginPage() {
 
   // Login mutation
   const loginMutation = useMutation({
-    mutationFn: async ({ email, password }: { email: string; password: string }) => {
+    mutationFn: async ({
+      email,
+      password,
+    }: {
+      email: string;
+      password: string;
+    }) => {
       console.log("Mutation function called", { email });
       try {
         const response = await authApi.login(email, password);
@@ -36,59 +42,75 @@ export default function LoginPage() {
       console.log("Login success:", response);
       if (response.success && response.data) {
         const { user, access_token, refresh_token } = response.data;
-        
+
         // Ensure access token is a valid string
         let validAccessToken: string;
-        if (typeof access_token === 'string' && access_token.length > 10) {
+        if (typeof access_token === "string" && access_token.length > 10) {
           validAccessToken = access_token;
         } else {
-          console.error('❌ Invalid access_token format:', access_token);
+          console.error("❌ Invalid access_token format:", access_token);
           setError("Invalid response from server. Please try again.");
           return;
         }
-        
+
         // Handle refresh token - it might be optional or in different format
         let validRefreshToken: string | null = null;
         if (refresh_token) {
-          if (typeof refresh_token === 'string' && refresh_token.length > 10) {
+          if (typeof refresh_token === "string" && refresh_token.length > 10) {
             validRefreshToken = refresh_token;
-          } else if (typeof refresh_token === 'object') {
+          } else if (typeof refresh_token === "object") {
             // Check if it's an object with a token property
-            if ('token' in refresh_token && typeof refresh_token.token === 'string') {
-              validRefreshToken = refresh_token.token;
-            } else if ('value' in refresh_token && typeof refresh_token.value === 'string') {
-              validRefreshToken = refresh_token.value;
+            // Check for 'token' or 'value' property safely using type assertion
+            const refreshTokenObj = refresh_token as any;
+            if (typeof refreshTokenObj.token === "string") {
+              validRefreshToken = refreshTokenObj.token;
+            } else if (
+              "value" in refreshTokenObj &&
+              typeof refreshTokenObj.value === "string"
+            ) {
+              validRefreshToken = refreshTokenObj.value;
             } else {
               // Empty object or invalid format - log warning but continue
-              console.warn('⚠️ Refresh token is not a valid string, login will proceed without it:', refresh_token);
+              console.warn(
+                "⚠️ Refresh token is not a valid string, login will proceed without it:",
+                refresh_token
+              );
               validRefreshToken = null;
             }
           } else {
-            console.warn('⚠️ Refresh token format is unexpected:', refresh_token);
+            console.warn(
+              "⚠️ Refresh token format is unexpected:",
+              refresh_token
+            );
             validRefreshToken = null;
           }
         }
-        
+
         // If we don't have a valid refresh token, we can still proceed with login
         // The app will work with just the access token, but won't be able to refresh
         if (!validRefreshToken) {
-          console.warn('⚠️ No valid refresh token provided, user will need to re-login when access token expires');
+          console.warn(
+            "⚠️ No valid refresh token provided, user will need to re-login when access token expires"
+          );
         }
-        
+
         console.log("Storing auth data...");
         // Store authentication data - pass the refresh token (or empty string if null)
         // The store will handle empty/invalid refresh tokens gracefully
         try {
-          setAuth(user, validAccessToken, validRefreshToken || '');
+          setAuth(user, validAccessToken, validRefreshToken || "");
         } catch (error: any) {
-          console.error('❌ Error storing auth:', error);
-          setError(error.message || "Failed to store authentication data. Please try again.");
+          console.error("❌ Error storing auth:", error);
+          setError(
+            error.message ||
+              "Failed to store authentication data. Please try again."
+          );
           return;
         }
-        
+
         // Clear any previous errors
         setError(null);
-        
+
         // Redirect to home or the original destination
         const redirect = searchParams.get("redirect") || "/";
         console.log("Redirecting to:", redirect);
@@ -107,7 +129,7 @@ export default function LoginPage() {
         response: error.response,
         request: error.request,
       });
-      
+
       // Handle API errors
       if (error.response?.data) {
         const apiError = error.response.data;
@@ -115,18 +137,29 @@ export default function LoginPage() {
         if (apiError.errors) {
           // Validation errors
           const firstError = Object.values(apiError.errors)[0];
-          setError(Array.isArray(firstError) ? firstError[0] : String(firstError));
+          setError(
+            Array.isArray(firstError) ? firstError[0] : String(firstError)
+          );
         } else {
-          setError(apiError.message || apiError.error || "Login failed. Please try again.");
+          setError(
+            apiError.message ||
+              apiError.error ||
+              "Login failed. Please try again."
+          );
         }
       } else if (error.request) {
         // Request was made but no response received
         console.error("No response from server");
-        setError("Cannot connect to server. Please check if the backend is running.");
+        setError(
+          "Cannot connect to server. Please check if the backend is running."
+        );
       } else {
         // Something else happened
         console.error("Request setup error:", error.message);
-        setError(error.message || "Network error. Please check your connection and try again.");
+        setError(
+          error.message ||
+            "Network error. Please check your connection and try again."
+        );
       }
     },
   });
@@ -136,10 +169,10 @@ export default function LoginPage() {
       e.preventDefault();
       e.stopPropagation();
     }
-    
+
     console.log("Form submitted", { email, password });
     setError(null);
-    
+
     // Validate inputs
     if (!email || !password) {
       setError("Please enter both email and password.");
@@ -152,7 +185,11 @@ export default function LoginPage() {
   };
 
   const handleButtonClick = () => {
-    console.log("Button clicked", { email, password, isPending: loginMutation.isPending });
+    console.log("Button clicked", {
+      email,
+      password,
+      isPending: loginMutation.isPending,
+    });
     handleSubmit();
   };
 
@@ -169,11 +206,7 @@ export default function LoginPage() {
 
         {/* Login Card */}
         <div className="bg-retro-cream border-4 border-retro-dark p-8 rounded-lg">
-          <form 
-            onSubmit={handleSubmit} 
-            className="space-y-6"
-            noValidate
-          >
+          <form onSubmit={handleSubmit} className="space-y-6" noValidate>
             {/* Email Input */}
             <div>
               <label
@@ -269,4 +302,3 @@ export default function LoginPage() {
     </div>
   );
 }
-

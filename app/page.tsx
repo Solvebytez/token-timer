@@ -172,6 +172,17 @@ export default function Home() {
     checkAndRefreshToken();
   }, []);
 
+  // Format time in IST timezone as "10:38:44 PM"
+  const formatISTTime = (date: Date): string => {
+    const istDate = new Date(date.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const hours = istDate.getHours();
+    const minutes = istDate.getMinutes();
+    const seconds = istDate.getSeconds();
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    const displayHours = hours % 12 || 12;
+    return `${displayHours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')} ${ampm}`;
+  };
+
   // Update clock every second
   useEffect(() => {
     const timer = setInterval(() => {
@@ -334,8 +345,44 @@ export default function Home() {
             description: `Data saved for time slot ${data.timeSlot}`,
             className: "bg-retro-green border-2 border-retro-dark text-white",
           });
-          // Refresh table data after auto-save (single save, so refresh immediately)
-          fetchTableData();
+          // Refresh table data after auto-save with current date to show newly saved data
+          const today = new Date();
+          const todayStr = today.toISOString().split('T')[0];
+          // Update filters to include today's date if no filters are set, or refresh with current filters
+          const refreshParams: any = {
+            page: 1, // Reset to first page to see new data
+            per_page: 10,
+          };
+          
+          // If no date filters are set, set today's date to show the newly saved data
+          if (!tableFilters.start_date && !tableFilters.end_date) {
+            refreshParams.start_date = todayStr;
+            refreshParams.end_date = todayStr;
+          } else {
+            // Keep existing filters but refresh
+            if (tableFilters.start_date) refreshParams.start_date = tableFilters.start_date;
+            if (tableFilters.end_date) refreshParams.end_date = tableFilters.end_date;
+          }
+          
+          if (tableFilters.time_slot) {
+            refreshParams.time_slot = tableFilters.time_slot;
+          }
+          
+          // Fetch with updated params
+          setTableLoading(true);
+          try {
+            const refreshResponse = await tokenDataApi.getAll(refreshParams);
+            if (refreshResponse.success && refreshResponse.data) {
+              setTableData(refreshResponse.data);
+              if (refreshResponse.pagination) {
+                setTablePagination(refreshResponse.pagination);
+              }
+            }
+          } catch (error: any) {
+            console.error('Error refreshing table after autosave:', error);
+          } finally {
+            setTableLoading(false);
+          }
         }
         
         return true;
@@ -1419,7 +1466,7 @@ export default function Home() {
           </div>
           <div className="text-right flex items-center gap-4">
             <div className="text-3xl font-bold text-retro-dark font-mono">
-              {currentTime.toLocaleTimeString()}
+              {formatISTTime(currentTime)}
             </div>
             
             {/* User Profile */}
