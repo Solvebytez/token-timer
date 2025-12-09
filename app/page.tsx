@@ -36,7 +36,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ArrowUp, ArrowDown, MoreVertical, LogOut } from "lucide-react";
+import { ArrowUp, ArrowDown, MoreVertical, LogOut, Download } from "lucide-react";
+import * as XLSX from 'xlsx';
 import { useToast } from "@/hooks/use-toast";
 import {
   DropdownMenu,
@@ -91,12 +92,14 @@ export default function Home() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [recordToDelete, setRecordToDelete] = useState<any>(null);
   
-  // Edit mode state
-  const [isEditMode, setIsEditMode] = useState(false);
+  // Edit mode state - for inline table editing
   const [editingRecordId, setEditingRecordId] = useState<number | null>(null);
-  const [editingRecordDate, setEditingRecordDate] = useState<string | null>(null);
-  const [editingRecordTimeSlot, setEditingRecordTimeSlot] = useState<string | null>(null);
-  const [editingRecordCounts, setEditingRecordCounts] = useState<Record<number, number> | null>(null);
+  const [editingCounts, setEditingCounts] = useState<Record<number, number>>({});
+  
+  // Show half quantity toggle - for table
+  const [showHalfQuantity, setShowHalfQuantity] = useState(false);
+  // Show half quantity toggle - for counter display
+  const [showHalfQuantityCounter, setShowHalfQuantityCounter] = useState(false);
 
   // Zustand store - using direct store access for actions to ensure reactivity
   const entries = useTokenStore((state) => state.entries);
@@ -134,8 +137,23 @@ export default function Home() {
             const data = await response.json();
             if (data.success && data.data?.access_token) {
               // Update both access and refresh tokens (backend now rotates refresh token)
-              const newAccessToken = data.data.access_token;
-              const newRefreshToken = data.data.refresh_token || refreshToken; // Use new if provided, fallback to old
+              const newAccessToken = typeof data.data.access_token === 'string' 
+                ? data.data.access_token 
+                : String(data.data.access_token);
+              
+              // Ensure refresh token is a string
+              const newRefreshTokenRaw = data.data.refresh_token || refreshToken;
+              const newRefreshToken = typeof newRefreshTokenRaw === 'string' 
+                ? newRefreshTokenRaw 
+                : String(newRefreshTokenRaw);
+              
+              // Validate tokens are not objects
+              if (newAccessToken === '[object Object]' || newRefreshToken === '[object Object]') {
+                console.error('❌ Invalid token format in refresh response:', data.data);
+                useAuthStore.getState().clearAuth();
+                return;
+              }
+              
               useAuthStore.getState().updateTokens(newAccessToken, newRefreshToken);
               console.log('✅ Token refreshed successfully on page load');
             }
@@ -316,6 +334,8 @@ export default function Home() {
             description: `Data saved for time slot ${data.timeSlot}`,
             className: "bg-retro-green border-2 border-retro-dark text-white",
           });
+          // Refresh table data after auto-save (single save, so refresh immediately)
+          fetchTableData();
         }
         
         return true;
@@ -356,11 +376,20 @@ export default function Home() {
     });
 
     // Save each slot
+    let allSavesSuccessful = true;
     for (const [slotKey, slotEntries] of Object.entries(entriesBySlot)) {
       const [dateStr, timeSlot] = slotKey.split('_');
       const slotDate = slotDates[slotKey];
       const data = prepareDataForBackend(timeSlot, slotEntries, slotDate);
-      await saveToBackend(data, slotEntries);
+      const success = await saveToBackend(data, slotEntries);
+      if (!success) {
+        allSavesSuccessful = false;
+      }
+    }
+
+    // Refresh table data after all saves complete
+    if (allSavesSuccessful) {
+      fetchTableData();
     }
 
     // Close the warning modal
@@ -415,9 +444,18 @@ export default function Home() {
       if (slotsToSave.length > 0) {
         console.log(`🔄 Found ${slotsToSave.length} passed time slot(s) to save`);
         
+        let allSavesSuccessful = true;
         for (const { slot, entries: slotEntries, date } of slotsToSave) {
           const data = prepareDataForBackend(slot, slotEntries, date);
-          await saveToBackend(data, slotEntries);
+          const success = await saveToBackend(data, slotEntries);
+          if (!success) {
+            allSavesSuccessful = false;
+          }
+        }
+        
+        // Refresh table data after all saves complete
+        if (allSavesSuccessful) {
+          fetchTableData();
         }
       }
     };
@@ -547,9 +585,24 @@ export default function Home() {
               if (refreshResponse.ok) {
                 const refreshData = await refreshResponse.json();
                 if (refreshData.success && refreshData.data?.access_token) {
-                  const newAccessToken = refreshData.data.access_token;
+                  // Ensure tokens are strings
+                  const newAccessToken = typeof refreshData.data.access_token === 'string' 
+                    ? refreshData.data.access_token 
+                    : String(refreshData.data.access_token);
+                  
+                  const newRefreshTokenRaw = refreshData.data.refresh_token || refreshToken;
+                  const newRefreshToken = typeof newRefreshTokenRaw === 'string' 
+                    ? newRefreshTokenRaw 
+                    : String(newRefreshTokenRaw);
+                  
+                  // Validate tokens are not objects
+                  if (newAccessToken === '[object Object]' || newRefreshToken === '[object Object]') {
+                    console.error(`❌ Invalid token format in refresh response for slot ${timeSlot}:`, refreshData.data);
+                    return;
+                  }
+                  
                   // Update token in store
-                  useAuthStore.getState().updateTokens(newAccessToken, refreshData.data.refresh_token || refreshToken);
+                  useAuthStore.getState().updateTokens(newAccessToken, newRefreshToken);
                   console.log(`✅ Token refreshed, retrying save for slot ${timeSlot}...`);
                   
                   // Retry with new token
@@ -680,78 +733,102 @@ export default function Home() {
     setActiveTab(tab);
   };
 
-  // Get counts - in edit mode, calculate from all entries; otherwise use 15-min window
-  const counts = isEditMode 
-    ? (() => {
-        // In edit mode, calculate counts from ALL entries (no time filter)
-        const allEntries = useTokenStore.getState().entries;
-        const editCounts: Record<number, number> = {};
-        for (let i = 0; i < 10; i++) {
-          editCounts[i] = 0;
-        }
-        allEntries.forEach((entry) => {
-          editCounts[entry.number] = (editCounts[entry.number] || 0) + entry.quantity;
-        });
-        return editCounts;
-      })()
-    : getCounts();
+  // Get counts - use 15-min window for form display
+  const counts = getCounts();
 
-  // Handle Edit Click - Load record's entries into form
+  // Handle Edit Click - Enable inline editing for table row
   const handleEditClick = (record: any) => {
     console.log("✏️ Edit clicked for record:", record);
     
-    // Set edit mode state
-    setIsEditMode(true);
+    // Set editing record ID
     setEditingRecordId(record.id);
-    setEditingRecordDate(record.date);
-    setEditingRecordTimeSlot(record.time_slot);
     
-    // Store original counts from record
-    if (record.counts && typeof record.counts === 'object') {
-      setEditingRecordCounts(record.counts);
+    // Initialize editing counts with current record counts
+    const initialCounts: Record<number, number> = {};
+    for (let i = 0; i < 10; i++) {
+      initialCounts[i] = record.counts?.[i] || 0;
     }
-    
-    // Load record's entries into Zustand store
-    if (record.entries && Array.isArray(record.entries)) {
-      // Convert entries to the format expected by the store
-      const formattedEntries = record.entries.map((entry: any) => ({
-        number: entry.number,
-        quantity: entry.quantity,
-        timestamp: entry.timestamp || Date.now(), // Preserve original timestamp or use current
-      }));
-      
-      // Replace all entries in store with record's entries
-      useTokenStore.setState({ entries: formattedEntries });
-      console.log("✅ Loaded entries into store:", formattedEntries.length);
-      console.log("✅ Record counts:", record.counts);
-    }
-    
-    // Clear input fields
-    setTno("");
-    setQuantity("");
-    
-    // Scroll to form (optional)
-    if (tnoInputRef.current) {
-      tnoInputRef.current.focus();
-    }
+    setEditingCounts(initialCounts);
   };
 
-  // Handle Cancel Edit - Exit edit mode
+  // Handle Cancel Edit - Exit inline edit mode
   const handleCancelEdit = () => {
-    setIsEditMode(false);
     setEditingRecordId(null);
-    setEditingRecordDate(null);
-    setEditingRecordTimeSlot(null);
-    setEditingRecordCounts(null);
-    clearEntries();
-    setTno("");
-    setQuantity("");
+    setEditingCounts({});
     
     toast({
       title: "Edit Cancelled",
       description: "Changes discarded",
       className: "bg-retro-accent border-2 border-retro-dark text-retro-dark",
     });
+  };
+
+  // Handle count input change in inline edit mode
+  const handleCountChange = (tokenNumber: number, value: string) => {
+    // Only allow positive integers (empty string or digits)
+    if (value === "" || /^\d+$/.test(value)) {
+      setEditingCounts(prev => ({
+        ...prev,
+        [tokenNumber]: value === "" ? 0 : parseInt(value, 10),
+      }));
+    }
+  };
+
+  // Handle Update Record - Save edited counts
+  const handleUpdateRecord = async (record: any) => {
+    if (!editingRecordId || editingRecordId !== record.id) return;
+
+    try {
+      // Reconstruct entries from edited counts
+      // Create entries that sum up to the counts (one entry per token number with quantity = count)
+      const reconstructedEntries: Array<{ number: number; quantity: number; timestamp: number }> = [];
+      const now = Date.now();
+      
+      for (let i = 0; i < 10; i++) {
+        const count = editingCounts[i] || 0;
+        if (count > 0) {
+          // Create a single entry with quantity equal to the count
+          reconstructedEntries.push({
+            number: i,
+            quantity: count,
+            timestamp: now + i, // Slight offset to ensure unique timestamps
+          });
+        }
+      }
+
+      // If no entries (all counts are 0), still send empty array
+      const response = await tokenDataApi.update(editingRecordId, {
+        entries: reconstructedEntries,
+      });
+      
+      if (response.success) {
+        toast({
+          title: "✅ Record Updated",
+          description: `Record updated successfully`,
+          className: "bg-retro-green border-2 border-retro-dark text-white",
+        });
+        
+        // Exit edit mode
+        setEditingRecordId(null);
+        setEditingCounts({});
+        
+        // Refresh table data
+        fetchTableData();
+      } else {
+        toast({
+          title: "❌ Update Failed",
+          description: response.message || "Failed to update record",
+          variant: "destructive",
+        });
+      }
+    } catch (error: any) {
+      console.error("❌ Error updating record:", error);
+      toast({
+        title: "❌ Update Failed",
+        description: error.message || "Failed to update record",
+        variant: "destructive",
+      });
+    }
   };
 
   // Handle Logout
@@ -833,75 +910,13 @@ export default function Home() {
     const qty = Number.parseInt(quantity);
 
     if (num >= 0 && num <= 9 && qty > 0) {
-      // If in edit mode, update the record
-      if (isEditMode && editingRecordId) {
-        // Add the new entry to the store first
-        addEntry(num, qty);
-        setTno("");
-        setQuantity("");
-        
-        // Get all current entries (including the one just added)
-        const currentEntries = useTokenStore.getState().entries;
-        
-        // Update the record via API
-        try {
-          const response = await tokenDataApi.update(editingRecordId, {
-            entries: currentEntries,
-          });
-          
-          if (response.success) {
-            toast({
-              title: "✅ Record Updated",
-              description: `Entry added and record updated successfully`,
-              className: "bg-retro-green border-2 border-retro-dark text-white",
-            });
-            
-            // Refresh table data
-            fetchTableData();
-            
-            // Exit edit mode and clear entries (recommended approach)
-            setIsEditMode(false);
-            setEditingRecordId(null);
-            setEditingRecordDate(null);
-            setEditingRecordTimeSlot(null);
-            setEditingRecordCounts(null);
-            clearEntries();
-            
-            // Reset focus to TNO input
-            if (tnoInputRef.current) {
-              tnoInputRef.current.focus();
-            }
-          } else {
-            toast({
-              title: "❌ Update Failed",
-              description: response.message || "Failed to update record",
-              variant: "destructive",
-            });
-            // Remove the entry we just added if update failed
-            const updatedEntries = currentEntries.slice(0, -1);
-            useTokenStore.setState({ entries: updatedEntries });
-          }
-        } catch (error: any) {
-          console.error("❌ Error updating record:", error);
-          toast({
-            title: "❌ Update Failed",
-            description: error.message || "Failed to update record",
-            variant: "destructive",
-          });
-          // Remove the entry we just added if update failed
-          const currentEntriesAfterError = useTokenStore.getState().entries;
-          const updatedEntries = currentEntriesAfterError.slice(0, -1);
-          useTokenStore.setState({ entries: updatedEntries });
-        }
-      } else {
-        // Normal mode: just add entry
-        addEntry(num, qty);
-        setTno("");
-        setQuantity("");
-        // Reset focus to TNO input after submission
-        if (tnoInputRef.current) {
-          tnoInputRef.current.focus();
-        }
+      // Normal mode: just add entry
+      addEntry(num, qty);
+      setTno("");
+      setQuantity("");
+      // Reset focus to TNO input after submission
+      if (tnoInputRef.current) {
+        tnoInputRef.current.focus();
       }
     }
   };
@@ -1049,6 +1064,125 @@ export default function Home() {
 
   const handlePageChange = (page: number) => {
     setTableFilters(prev => ({ ...prev, page }));
+  };
+
+  // Handle Excel Export
+  const handleExportToExcel = async () => {
+    try {
+      setTableLoading(true);
+      
+      // Fetch all records matching current filters by paginating through all pages
+      const allRecords: any[] = [];
+      let currentPage = 1;
+      let hasMorePages = true;
+      const perPage = 100; // Max allowed by backend
+
+      // Base params with filters
+      const baseParams: any = {
+        per_page: perPage,
+      };
+      
+      if (tableFilters.start_date) {
+        baseParams.start_date = tableFilters.start_date;
+      }
+      if (tableFilters.end_date) {
+        baseParams.end_date = tableFilters.end_date;
+      }
+      if (tableFilters.time_slot) {
+        baseParams.time_slot = tableFilters.time_slot;
+      }
+
+      // Fetch all pages
+      while (hasMorePages) {
+        const params = { ...baseParams, page: currentPage };
+        const response = await tokenDataApi.getAll(params);
+        
+        if (!response.success || !response.data) {
+          toast({
+            title: "❌ Export Failed",
+            description: response.message || "Failed to fetch data for export",
+            variant: "destructive",
+          });
+          setTableLoading(false);
+          return;
+        }
+
+        allRecords.push(...response.data);
+
+        // Check if there are more pages
+        if (response.pagination) {
+          hasMorePages = currentPage < response.pagination.last_page;
+          currentPage++;
+        } else {
+          // If no pagination info, assume no more pages if we got less than perPage
+          hasMorePages = response.data.length === perPage;
+          currentPage++;
+        }
+      }
+
+      // Prepare data for Excel
+      const excelData = allRecords.map((record: any) => {
+        const counts = record.counts || {};
+        const row: any = {
+          'Date': new Date(record.date).toLocaleDateString('en-GB', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric'
+          }),
+          'Time Slot': record.time_slot,
+        };
+
+        // Add token counts (0-9)
+        for (let i = 0; i < 10; i++) {
+          const count = counts[i] || 0;
+          row[`Token ${i}`] = showHalfQuantity ? Math.floor(count / 2) : count;
+        }
+
+        // Add total entries
+        row['Total Entries'] = Array.isArray(record.entries) ? record.entries.length : 0;
+
+        return row;
+      });
+
+      // Create workbook and worksheet
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.json_to_sheet(excelData);
+
+      // Set column widths (auto-width)
+      const colWidths = [
+        { wch: 12 }, // Date
+        { wch: 12 }, // Time Slot
+        ...Array.from({ length: 10 }, () => ({ wch: 10 })), // Token 0-9
+        { wch: 12 }, // Total Entries
+      ];
+      ws['!cols'] = colWidths;
+
+      // Add worksheet to workbook
+      XLSX.utils.book_append_sheet(wb, ws, 'Token Data');
+
+      // Generate filename with current date
+      const today = new Date();
+      const dateStr = today.toISOString().split('T')[0]; // YYYY-MM-DD
+      const filename = `token-data-${dateStr}.xlsx`;
+
+      // Write and download
+      XLSX.writeFile(wb, filename);
+
+      toast({
+        title: "✅ Export Successful",
+        description: `Exported ${allRecords.length} records to ${filename}`,
+        className: "bg-retro-green border-2 border-retro-dark text-white",
+      });
+    } catch (error: any) {
+      console.error('Error exporting to Excel:', error);
+      toast({
+        title: "❌ Export Failed",
+        description: error.message || "An error occurred while exporting",
+        variant: "destructive",
+      });
+    } finally {
+      setTableLoading(false);
+    }
   };
 
   // Handle delete record
@@ -1328,22 +1462,6 @@ export default function Home() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6" style={{ minHeight: 0 }}>
           {/* Left Column - Input and Counter */}
           <div className="lg:col-span-2">
-            {/* Edit Mode Banner */}
-            {isEditMode && (
-              <div className="bg-retro-accent border-4 border-retro-dark p-4 mb-4 rounded-lg flex justify-between items-center">
-                <div>
-                  <span className="font-bold text-retro-dark text-lg">
-                    ✏️ Editing: {editingRecordDate ? new Date(editingRecordDate).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' }) : ''} - {editingRecordTimeSlot || ''}
-                  </span>
-                </div>
-                <button
-                  onClick={handleCancelEdit}
-                  className="bg-retro-dark text-white font-bold px-4 py-2 rounded-lg hover:bg-opacity-90 transition-all"
-                >
-                  Cancel Edit
-                </button>
-              </div>
-            )}
             
             {/* Input Section */}
             <div className="bg-retro-cream border-4 border-retro-dark p-6 mb-8 rounded-lg">
@@ -1390,29 +1508,32 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Refresh/Update Button */}
+              {/* Add Button */}
               <button
                 onClick={handleRefresh}
                 className="w-full bg-retro-accent border-4 border-retro-dark text-retro-dark font-bold text-lg py-3 rounded-lg hover:bg-opacity-90 transition-all active:scale-95"
               >
-                {isEditMode ? "UPDATE" : "REFRESH"}
+                Add
               </button>
+            </div>
+
+            {/* Show Half Quantity Checkbox - For Counter Display */}
+            <div className="mb-4 flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="showHalfQuantityCounter"
+                checked={showHalfQuantityCounter}
+                onChange={(e) => setShowHalfQuantityCounter(e.target.checked)}
+                className="w-4 h-4 border-2 border-retro-dark rounded cursor-pointer"
+              />
+              <label htmlFor="showHalfQuantityCounter" className="text-sm font-bold text-retro-dark cursor-pointer">
+                Show Half Quantity
+              </label>
             </div>
 
             {/* Counter Display */}
             <div className="bg-retro-dark border-4 border-retro-accent p-6 rounded-lg">
-              {/* Green Number Row */}
-              <div className="grid grid-cols-5 sm:grid-cols-10 gap-2 mb-2">
-                {Array.from({ length: 10 }, (_, i) => (
-                  <div
-                    key={i}
-                    className="flex items-center justify-center bg-retro-green border-3 border-retro-accent px-3 sm:px-6 py-4 rounded-lg"
-                  >
-                    <div className="text-2xl font-bold text-white">{i}</div>
-                  </div>
-                ))}
-              </div>
-              {/* Quantity Boxes Row - Outside green container */}
+              {/* Stacked Columns: Number on top, Quantity below */}
               <div className="grid grid-cols-5 sm:grid-cols-10 gap-2">
                 {Array.from({ length: 10 }, (_, i) => {
                   // Different colors for each number
@@ -1430,13 +1551,17 @@ export default function Home() {
                   ];
                   
                   return (
-                    <div
-                      key={i}
-                      className="bg-white font-bold text-xl sm:text-2xl px-2 sm:px-4 py-2 rounded min-h-12 flex items-center justify-center border-2 border-retro-dark"
-                    >
-                      <span className={colors[i]}>
-                        {counts[i] || 0}
-                      </span>
+                    <div key={i} className="flex flex-col gap-2">
+                      {/* Green Number Box - Top */}
+                      <div className="flex items-center justify-center bg-retro-green border-3 border-retro-accent px-3 sm:px-6 py-4 rounded-lg">
+                        <div className="text-2xl font-bold text-white">{i}</div>
+                      </div>
+                      {/* Quantity Box - Bottom */}
+                      <div className="bg-white font-bold text-xl sm:text-2xl px-2 sm:px-4 py-2 rounded min-h-12 flex items-center justify-center border-2 border-retro-dark">
+                        <span className={colors[i]}>
+                          {showHalfQuantityCounter ? Math.floor((counts[i] || 0) / 2) : (counts[i] || 0)}
+                        </span>
+                      </div>
                     </div>
                   );
                 })}
@@ -1543,7 +1668,17 @@ export default function Home() {
         {/* Data Table - Full Width */}
         <div className="mt-8">
           <div className="bg-retro-cream border-4 border-retro-dark p-6 rounded-lg">
-            <h2 className="text-2xl font-bold text-retro-dark mb-4">Saved Records</h2>
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-2xl font-bold text-retro-dark">Saved Records</h2>
+              <Button
+                onClick={handleExportToExcel}
+                disabled={tableLoading}
+                className="bg-retro-green border-2 border-retro-dark text-white font-bold hover:bg-opacity-90 flex items-center gap-2"
+              >
+                <Download className="h-4 w-4" />
+                Export to Excel
+              </Button>
+            </div>
             
             {/* Filters */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
@@ -1588,6 +1723,20 @@ export default function Home() {
                   Clear Filters
                 </Button>
               </div>
+            </div>
+
+            {/* Show Half Quantity Checkbox */}
+            <div className="mb-4 flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="showHalfQuantity"
+                checked={showHalfQuantity}
+                onChange={(e) => setShowHalfQuantity(e.target.checked)}
+                className="w-4 h-4 border-2 border-retro-dark rounded cursor-pointer"
+              />
+              <label htmlFor="showHalfQuantity" className="text-sm font-bold text-retro-dark cursor-pointer">
+                Show Half Quantity
+              </label>
             </div>
 
             {/* Table */}
@@ -1669,6 +1818,7 @@ export default function Home() {
                     </TableRow>
                   ) : (
                     sortedTableData.map((record: any) => {
+                      const isEditing = editingRecordId === record.id;
                       const counts = record.counts || {};
                       const totalEntries = Array.isArray(record.entries) ? record.entries.length : 0;
                       const colors = [
@@ -1678,7 +1828,7 @@ export default function Home() {
                       ];
                       
                       return (
-                        <TableRow key={record.id} className="hover:bg-retro-cream/50">
+                        <TableRow key={record.id} className={`hover:bg-retro-cream/50 ${isEditing ? 'bg-retro-accent/20' : ''}`}>
                           <TableCell className="font-bold text-retro-dark">
                             {new Date(record.date).toLocaleDateString('en-GB', {
                               day: '2-digit',
@@ -1689,42 +1839,90 @@ export default function Home() {
                           <TableCell className="font-bold text-retro-dark">{record.time_slot}</TableCell>
                           {Array.from({ length: 10 }, (_, i) => (
                             <TableCell key={i} className="text-center">
-                              <span className={colors[i]}>{counts[i] || 0}</span>
+                              {isEditing ? (
+                                <Input
+                                  type="text"
+                                  inputMode="numeric"
+                                  value={editingCounts[i] || 0}
+                                  onChange={(e) => handleCountChange(i, e.target.value)}
+                                  onKeyDown={(e) => {
+                                    // Allow: backspace, delete, tab, escape, enter, and arrow keys
+                                    if (
+                                      ['Backspace', 'Delete', 'Tab', 'Escape', 'Enter', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)
+                                    ) {
+                                      return;
+                                    }
+                                    // Allow Ctrl/Cmd + A, C, V, X
+                                    if ((e.ctrlKey || e.metaKey) && ['a', 'c', 'v', 'x'].includes(e.key.toLowerCase())) {
+                                      return;
+                                    }
+                                    // Only allow numbers 0-9
+                                    if (!/^\d$/.test(e.key)) {
+                                      e.preventDefault();
+                                    }
+                                  }}
+                                  className="w-16 text-center font-bold border-2 border-retro-dark"
+                                  style={{ padding: '4px 8px' }}
+                                />
+                              ) : (
+                                <span className={colors[i]}>
+                                  {showHalfQuantity ? Math.floor((counts[i] || 0) / 2) : (counts[i] || 0)}
+                                </span>
+                              )}
                             </TableCell>
                           ))}
                           <TableCell className="text-center font-bold text-retro-dark">
                             {totalEntries}
                           </TableCell>
                           <TableCell className="text-center">
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
+                            {isEditing ? (
+                              <div className="flex flex-col gap-2 items-center">
                                 <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-8 w-8 hover:bg-retro-cream/50"
+                                  onClick={() => handleUpdateRecord(record)}
+                                  className="bg-retro-green border-2 border-retro-dark text-white font-bold hover:bg-opacity-90 h-8 px-3 w-full"
+                                  size="sm"
                                 >
-                                  <MoreVertical className="h-4 w-4 text-retro-dark" />
+                                  Update
                                 </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent 
-                                align="end"
-                                className="bg-retro-cream border-2 border-retro-dark"
-                              >
-                                <DropdownMenuItem
-                                  onClick={() => handleEditClick(record)}
-                                  className="cursor-pointer hover:bg-retro-accent/50 text-retro-dark font-bold"
+                                <Button
+                                  onClick={handleCancelEdit}
+                                  className="bg-retro-accent border-2 border-retro-dark text-retro-dark font-bold hover:bg-opacity-90 h-8 px-3 w-full"
+                                  size="sm"
                                 >
-                                  Edit
-                                </DropdownMenuItem>
-                                <DropdownMenuItem
-                                  variant="destructive"
-                                  onClick={() => handleDeleteClick(record)}
-                                  className="cursor-pointer hover:bg-red-500/20 text-red-600 font-bold"
+                                  Cancel
+                                </Button>
+                              </div>
+                            ) : (
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8 hover:bg-retro-cream/50"
+                                  >
+                                    <MoreVertical className="h-4 w-4 text-retro-dark" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent 
+                                  align="end"
+                                  className="bg-retro-cream border-2 border-retro-dark"
                                 >
-                                  Delete
-                                </DropdownMenuItem>
-                              </DropdownMenuContent>
-                            </DropdownMenu>
+                                  <DropdownMenuItem
+                                    onClick={() => handleEditClick(record)}
+                                    className="cursor-pointer hover:bg-retro-accent/50 text-retro-dark font-bold"
+                                  >
+                                    Edit
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    variant="destructive"
+                                    onClick={() => handleDeleteClick(record)}
+                                    className="cursor-pointer hover:bg-red-500/20 text-red-600 font-bold"
+                                  >
+                                    Delete
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            )}
                           </TableCell>
                         </TableRow>
                       );

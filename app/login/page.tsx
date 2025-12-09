@@ -37,9 +37,54 @@ export default function LoginPage() {
       if (response.success && response.data) {
         const { user, access_token, refresh_token } = response.data;
         
+        // Ensure access token is a valid string
+        let validAccessToken: string;
+        if (typeof access_token === 'string' && access_token.length > 10) {
+          validAccessToken = access_token;
+        } else {
+          console.error('❌ Invalid access_token format:', access_token);
+          setError("Invalid response from server. Please try again.");
+          return;
+        }
+        
+        // Handle refresh token - it might be optional or in different format
+        let validRefreshToken: string | null = null;
+        if (refresh_token) {
+          if (typeof refresh_token === 'string' && refresh_token.length > 10) {
+            validRefreshToken = refresh_token;
+          } else if (typeof refresh_token === 'object') {
+            // Check if it's an object with a token property
+            if ('token' in refresh_token && typeof refresh_token.token === 'string') {
+              validRefreshToken = refresh_token.token;
+            } else if ('value' in refresh_token && typeof refresh_token.value === 'string') {
+              validRefreshToken = refresh_token.value;
+            } else {
+              // Empty object or invalid format - log warning but continue
+              console.warn('⚠️ Refresh token is not a valid string, login will proceed without it:', refresh_token);
+              validRefreshToken = null;
+            }
+          } else {
+            console.warn('⚠️ Refresh token format is unexpected:', refresh_token);
+            validRefreshToken = null;
+          }
+        }
+        
+        // If we don't have a valid refresh token, we can still proceed with login
+        // The app will work with just the access token, but won't be able to refresh
+        if (!validRefreshToken) {
+          console.warn('⚠️ No valid refresh token provided, user will need to re-login when access token expires');
+        }
+        
         console.log("Storing auth data...");
-        // Store authentication data
-        setAuth(user, access_token, refresh_token);
+        // Store authentication data - pass the refresh token (or empty string if null)
+        // The store will handle empty/invalid refresh tokens gracefully
+        try {
+          setAuth(user, validAccessToken, validRefreshToken || '');
+        } catch (error: any) {
+          console.error('❌ Error storing auth:', error);
+          setError(error.message || "Failed to store authentication data. Please try again.");
+          return;
+        }
         
         // Clear any previous errors
         setError(null);

@@ -1,8 +1,13 @@
-import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
-import { useAuthStore } from '@/stores/auth-store';
+import axios, {
+  AxiosInstance,
+  AxiosError,
+  InternalAxiosRequestConfig,
+} from "axios";
+import { useAuthStore } from "@/stores/auth-store";
 
 // API Base URL - Update this to match your Laravel backend
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
 /**
  * Create axios instance with default config
@@ -10,8 +15,8 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/a
 const apiClient: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
   headers: {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
+    "Content-Type": "application/json",
+    Accept: "application/json",
   },
   timeout: 30000,
 });
@@ -23,11 +28,11 @@ apiClient.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     // Get access token from auth store
     const accessToken = useAuthStore.getState().accessToken;
-    
+
     if (accessToken && config.headers) {
       config.headers.Authorization = `Bearer ${accessToken}`;
     }
-    
+
     return config;
   },
   (error: AxiosError) => {
@@ -43,7 +48,9 @@ apiClient.interceptors.response.use(
     return response;
   },
   async (error: AxiosError) => {
-    const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
+    const originalRequest = error.config as InternalAxiosRequestConfig & {
+      _retry?: boolean;
+    };
 
     // If token expired (401) and we haven't retried yet
     if (error.response?.status === 401 && !originalRequest._retry) {
@@ -51,7 +58,7 @@ apiClient.interceptors.response.use(
 
       try {
         const { refreshToken } = useAuthStore.getState();
-        
+
         if (!refreshToken) {
           // No refresh token, clear auth
           useAuthStore.getState().clearAuth();
@@ -59,45 +66,75 @@ apiClient.interceptors.response.use(
         }
 
         // Try to refresh the token
-        const response = await axios.post(`${API_BASE_URL}/refresh`, {}, {
-          headers: {
-            'Authorization': `Bearer ${refreshToken}`,
-          },
-        });
+        const response = await axios.post(
+          `${API_BASE_URL}/refresh`,
+          {},
+          {
+            headers: {
+              Authorization: `Bearer ${refreshToken}`,
+            },
+          }
+        );
 
         // Handle response structure
         if (response.data.success && response.data.data) {
           const { access_token, refresh_token } = response.data.data;
-          
+
           if (!access_token) {
-            throw new Error('No access token in refresh response');
+            throw new Error("No access token in refresh response");
           }
-          
+
+          // Ensure tokens are strings
+          const validAccessToken =
+            typeof access_token === "string"
+              ? access_token
+              : String(access_token);
+
+          const refreshTokenRaw = refresh_token || refreshToken;
+          const validRefreshToken =
+            typeof refreshTokenRaw === "string"
+              ? refreshTokenRaw
+              : String(refreshTokenRaw);
+
+          // Validate tokens are not objects
+          if (
+            validAccessToken === "[object Object]" ||
+            validRefreshToken === "[object Object]"
+          ) {
+            console.error(
+              "❌ Invalid token format in refresh response:",
+              response.data.data
+            );
+            throw new Error("Invalid token format in refresh response");
+          }
+
           // Update tokens in store
-          useAuthStore.getState().updateTokens(access_token, refresh_token || refreshToken);
+          useAuthStore
+            .getState()
+            .updateTokens(validAccessToken, validRefreshToken);
 
           // Retry original request with new token
           if (originalRequest.headers) {
             originalRequest.headers.Authorization = `Bearer ${access_token}`;
           }
-          
+
           return apiClient(originalRequest);
         } else {
-          throw new Error('Invalid refresh response structure');
+          throw new Error("Invalid refresh response structure");
         }
       } catch (refreshError: any) {
         // Refresh failed, clear auth
-        console.error('❌ Token refresh failed in interceptor:', refreshError);
+        console.error("❌ Token refresh failed in interceptor:", refreshError);
         useAuthStore.getState().clearAuth();
-        
+
         // If we're in the browser, redirect to login
-        if (typeof window !== 'undefined') {
+        if (typeof window !== "undefined") {
           // Only redirect if not already on login page
-          if (!window.location.pathname.includes('/login')) {
-            window.location.href = '/login';
+          if (!window.location.pathname.includes("/login")) {
+            window.location.href = "/login";
           }
         }
-        
+
         return Promise.reject(refreshError);
       }
     }
@@ -107,4 +144,3 @@ apiClient.interceptors.response.use(
 );
 
 export default apiClient;
-

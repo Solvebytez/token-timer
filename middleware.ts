@@ -22,7 +22,42 @@ export async function middleware(request: NextRequest) {
 
   // Get auth token from cookie
   const authToken = request.cookies.get("auth_token")?.value;
-  const refreshToken = request.cookies.get("refresh_token")?.value;
+  let refreshToken = request.cookies.get("refresh_token")?.value;
+
+  // IMMEDIATELY validate and clear invalid refresh tokens
+  // This prevents "[object Object]" from persisting in cookies
+  if (refreshToken) {
+    if (
+      typeof refreshToken !== "string" ||
+      refreshToken === "[object Object]" ||
+      refreshToken.length < 10
+    ) {
+      console.error(
+        "❌ Invalid refresh token detected, clearing immediately:",
+        refreshToken
+      );
+      // Clear the invalid cookie immediately
+      refreshToken = undefined;
+      // If we're on a protected route, redirect to login and clear cookies
+      if (
+        pathname !== "/login" &&
+        !pathname.startsWith("/_next/") &&
+        !pathname.startsWith("/api/")
+      ) {
+        const url = request.nextUrl.clone();
+        url.pathname = "/login";
+        const redirectResponse = NextResponse.redirect(url);
+        redirectResponse.cookies.delete("refresh_token");
+        redirectResponse.cookies.delete("auth_token");
+        return redirectResponse;
+      }
+      // For non-protected routes, just clear cookies and continue
+      const response = NextResponse.next();
+      response.cookies.delete("refresh_token");
+      response.cookies.delete("auth_token");
+      return response;
+    }
+  }
 
   // Define auth routes (login, register, etc.)
   const authRoutes = ["/login"];
@@ -84,7 +119,13 @@ export async function middleware(request: NextRequest) {
           const refreshData = await refreshResponse.json();
           if (refreshData.success && refreshData.data?.access_token) {
             newAccessToken = refreshData.data.access_token;
-            const newRefreshToken = refreshData.data?.refresh_token;
+            // Ensure refresh token is a string if provided
+            const refreshTokenRaw = refreshData.data?.refresh_token;
+            newRefreshToken = refreshTokenRaw
+              ? typeof refreshTokenRaw === "string"
+                ? refreshTokenRaw
+                : String(refreshTokenRaw)
+              : undefined;
             tokenToUse = newAccessToken;
             console.log("✅ Token refreshed successfully");
 
@@ -124,13 +165,30 @@ export async function middleware(request: NextRequest) {
 
         // Update refresh token if provided (token rotation)
         if (newRefreshToken) {
-          const refreshExpires = new Date();
-          refreshExpires.setDate(refreshExpires.getDate() + 30); // 30 days for refresh token
-          redirectResponse.cookies.set("refresh_token", newRefreshToken, {
-            expires: refreshExpires,
-            path: "/",
-            sameSite: "lax",
-          });
+          // Ensure refresh token is a string
+          const validRefreshToken =
+            typeof newRefreshToken === "string"
+              ? newRefreshToken
+              : String(newRefreshToken);
+
+          // Validate it's not "[object Object]"
+          if (
+            validRefreshToken === "[object Object]" ||
+            validRefreshToken.length < 10
+          ) {
+            console.error(
+              "❌ Invalid refresh token format in middleware:",
+              newRefreshToken
+            );
+          } else {
+            const refreshExpires = new Date();
+            refreshExpires.setDate(refreshExpires.getDate() + 30); // 30 days for refresh token
+            redirectResponse.cookies.set("refresh_token", validRefreshToken, {
+              expires: refreshExpires,
+              path: "/",
+              sameSite: "lax",
+            });
+          }
         }
 
         return redirectResponse;
@@ -229,7 +287,30 @@ export async function middleware(request: NextRequest) {
     }
 
     // If access token is missing or expired, try to refresh
-    if (shouldRefresh && refreshToken) {
+    if (shouldRefresh) {
+      // Check if we have a valid refresh token
+      if (
+        !refreshToken ||
+        typeof refreshToken !== "string" ||
+        refreshToken === "[object Object]" ||
+        refreshToken.length < 50
+      ) {
+        // No valid refresh token available - user needs to re-login
+        console.log(
+          "❌ Access token expired and no valid refresh token available"
+        );
+        console.log(
+          "   User needs to re-login. This is expected if backend didn't provide refresh token."
+        );
+        const url = request.nextUrl.clone();
+        url.pathname = "/login";
+        const response = NextResponse.redirect(url);
+        response.cookies.delete("auth_token");
+        response.cookies.delete("refresh_token");
+        return response;
+      }
+
+      // We have a valid refresh token, proceed with refresh
       console.log("🔄 Access token missing/expired, attempting to refresh...");
       console.log(
         "🔑 Refresh token preview:",
@@ -259,7 +340,13 @@ export async function middleware(request: NextRequest) {
 
           if (refreshData.success && refreshData.data?.access_token) {
             newAccessToken = refreshData.data.access_token;
-            newRefreshToken = refreshData.data?.refresh_token;
+            // Ensure refresh token is a string if provided
+            const refreshTokenRaw = refreshData.data?.refresh_token;
+            newRefreshToken = refreshTokenRaw
+              ? typeof refreshTokenRaw === "string"
+                ? refreshTokenRaw
+                : String(refreshTokenRaw)
+              : undefined;
             console.log("✅ Token refreshed successfully in middleware");
 
             // Set new access token in cookie and allow request to proceed
@@ -276,13 +363,30 @@ export async function middleware(request: NextRequest) {
 
             // Update refresh token if provided (token rotation)
             if (newRefreshToken) {
-              const refreshExpires = new Date();
-              refreshExpires.setDate(refreshExpires.getDate() + 30); // 30 days for refresh token
-              response.cookies.set("refresh_token", newRefreshToken, {
-                expires: refreshExpires,
-                path: "/",
-                sameSite: "lax",
-              });
+              // Ensure refresh token is a string
+              const validRefreshToken =
+                typeof newRefreshToken === "string"
+                  ? newRefreshToken
+                  : String(newRefreshToken);
+
+              // Validate it's not "[object Object]"
+              if (
+                validRefreshToken === "[object Object]" ||
+                validRefreshToken.length < 10
+              ) {
+                console.error(
+                  "❌ Invalid refresh token format in middleware:",
+                  newRefreshToken
+                );
+              } else {
+                const refreshExpires = new Date();
+                refreshExpires.setDate(refreshExpires.getDate() + 30); // 30 days for refresh token
+                response.cookies.set("refresh_token", validRefreshToken, {
+                  expires: refreshExpires,
+                  path: "/",
+                  sameSite: "lax",
+                });
+              }
             }
 
             return response;
