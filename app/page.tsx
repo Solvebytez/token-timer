@@ -4,6 +4,7 @@ import type React from "react";
 
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTokenStore } from "@/stores/token-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { tokenDataApi } from "@/lib/api-services";
@@ -322,77 +323,68 @@ export default function Home() {
     };
   };
 
-  // Save data to backend
-  const saveToBackend = async (data: ReturnType<typeof prepareDataForBackend>, entriesToRemove: typeof entries, showToast: boolean = false) => {
-    try {
+  // Save data to backend using TanStack Query mutation
+  const saveMutation = useMutation({
+    mutationFn: async ({ data, entriesToRemove, showToast }: { 
+      data: ReturnType<typeof prepareDataForBackend>, 
+      entriesToRemove: typeof entries, 
+      showToast: boolean 
+    }) => {
       console.log("📤 Auto-saving data to backend:", data);
-      
       const response = await tokenDataApi.save(data);
       
-      if (response.success) {
-        console.log("✅ Data saved successfully for time slot:", data.timeSlot);
-        // Remove only the saved entries from store
-        const remainingEntries = useTokenStore.getState().entries.filter(
-          (entry) => !entriesToRemove.some((e) => e.timestamp === entry.timestamp)
-        );
-        useTokenStore.setState({ entries: remainingEntries });
-        console.log("🗑️ Saved entries removed from local storage");
-        
-        // Show success toast notification only for auto-save
-        if (showToast) {
-          toast({
-            title: "✅ Auto-save Successful",
-            description: `Data saved for time slot ${data.timeSlot}`,
-            className: "bg-retro-green border-2 border-retro-dark text-white",
-          });
-          // Refresh table data after auto-save with current date to show newly saved data
-          const today = new Date();
-          const todayStr = today.toISOString().split('T')[0];
-          // Update filters to include today's date if no filters are set, or refresh with current filters
-          const refreshParams: any = {
-            page: 1, // Reset to first page to see new data
-            per_page: 10,
-          };
-          
-          // If no date filters are set, set today's date to show the newly saved data
-          if (!tableFilters.start_date && !tableFilters.end_date) {
-            refreshParams.start_date = todayStr;
-            refreshParams.end_date = todayStr;
-          } else {
-            // Keep existing filters but refresh
-            if (tableFilters.start_date) refreshParams.start_date = tableFilters.start_date;
-            if (tableFilters.end_date) refreshParams.end_date = tableFilters.end_date;
-          }
-          
-          if (tableFilters.time_slot) {
-            refreshParams.time_slot = tableFilters.time_slot;
-          }
-          
-          // Fetch with updated params
-          setTableLoading(true);
-          try {
-            const refreshResponse = await tokenDataApi.getAll(refreshParams);
-            if (refreshResponse.success && refreshResponse.data) {
-              setTableData(refreshResponse.data);
-              if (refreshResponse.pagination) {
-                setTablePagination(refreshResponse.pagination);
-              }
-            }
-          } catch (error: any) {
-            console.error('Error refreshing table after autosave:', error);
-          } finally {
-            setTableLoading(false);
-          }
-        }
-        
-        return true;
-      } else {
-        console.error("❌ Failed to save data:", response.message);
-        return false;
+      if (!response.success) {
+        throw new Error(response.message || 'Failed to save data');
       }
-    } catch (error: any) {
+      
+      return { data, entriesToRemove, showToast, timeSlot: data.timeSlot };
+    },
+    onSuccess: ({ data, entriesToRemove, showToast, timeSlot }) => {
+      console.log("✅ Data saved successfully for time slot:", timeSlot);
+      
+      // Remove only the saved entries from store
+      const remainingEntries = useTokenStore.getState().entries.filter(
+        (entry) => !entriesToRemove.some((e) => e.timestamp === entry.timestamp)
+      );
+      useTokenStore.setState({ entries: remainingEntries });
+      console.log("🗑️ Saved entries removed from local storage");
+      
+      // Show success toast notification only for auto-save
+      if (showToast) {
+        toast({
+          title: "✅ Auto-save Successful",
+          description: `Data saved for time slot ${timeSlot}`,
+          className: "bg-retro-green border-2 border-retro-dark text-white",
+        });
+      }
+      
+      // Invalidate and refetch table data - this will automatically refresh the table
+      console.log('🔄 Invalidating queries with key:', ['tokenData']);
+      console.log('📋 Current query cache:', queryClient.getQueryCache().getAll().map(q => q.queryKey));
+      const invalidateResult = queryClient.invalidateQueries({ queryKey: ['tokenData'] });
+      console.log('✅ Invalidation result:', invalidateResult);
+      invalidateResult.then(() => {
+        console.log('🔄 Query invalidation completed, checking if refetch will happen...');
+        const queries = queryClient.getQueryCache().findAll({ queryKey: ['tokenData'] });
+        console.log('📊 Found queries to invalidate:', queries.length, queries.map(q => ({ key: q.queryKey, state: q.state.status })));
+      });
+    },
+    onError: (error: any) => {
       console.error("❌ Error saving data:", error);
-      // Keep data if save fails
+      toast({
+        title: "❌ Save Failed",
+        description: error.message || "Failed to save data. Please try again.",
+        className: "bg-red-500 border-2 border-retro-dark text-white",
+      });
+    },
+  });
+
+  // Wrapper function to maintain compatibility with existing code
+  const saveToBackend = async (data: ReturnType<typeof prepareDataForBackend>, entriesToRemove: typeof entries, showToast: boolean = false) => {
+    try {
+      await saveMutation.mutateAsync({ data, entriesToRemove, showToast });
+      return true;
+    } catch (error) {
       return false;
     }
   };
@@ -436,7 +428,7 @@ export default function Home() {
 
     // Refresh table data after all saves complete
     if (allSavesSuccessful) {
-      fetchTableData();
+      queryClient.invalidateQueries({ queryKey: ['tokenData'] });
     }
 
     // Close the warning modal
@@ -691,6 +683,10 @@ export default function Home() {
               );
               useTokenStore.setState({ entries: remainingEntries });
               console.log(`🗑️ All entries saved successfully - removed ${allEntriesToSave.length} entries from local storage`);
+              
+              // Invalidate queries to refresh table data
+              console.log('🔄 Invalidating queries after saveOnClose success');
+              queryClient.invalidateQueries({ queryKey: ['tokenData'] });
             } else {
               // Some saves failed - keep entries for retry on reopen
               console.log(`⚠️ Some saves failed (${successCount}/${totalSlots} succeeded) - keeping entries for retry on reopen`);
@@ -860,7 +856,7 @@ export default function Home() {
         setEditingCounts({});
         
         // Refresh table data
-        fetchTableData();
+        queryClient.invalidateQueries({ queryKey: ['tokenData'] });
       } else {
         toast({
           title: "❌ Update Failed",
@@ -1039,20 +1035,30 @@ export default function Home() {
   // Generate time slot options for filter
   const timeSlotOptions = generateTimeSlots();
 
-  // Fetch table data function (moved outside useEffect to be accessible)
-  const fetchTableData = async () => {
-    // Check if user is authenticated before fetching
-    const authState = useAuthStore.getState();
-    const { accessToken, refreshToken } = authState;
-    
-    // Only fetch if we have at least a refresh token
-    if (!accessToken && !refreshToken) {
-      setTableLoading(false);
-      return;
-    }
+  // Get query client for invalidating queries
+  const queryClient = useQueryClient();
+  
+  // Fetch table data using TanStack Query
+  const { data: tableQueryData, isLoading: tableQueryLoading, error: tableQueryError, refetch: refetchTableData } = useQuery({
+    queryKey: ['tokenData', tableFilters.page, tableFilters.start_date, tableFilters.end_date, tableFilters.time_slot],
+    queryFn: async () => {
+      console.log('🔍 Query function executing - fetching table data with filters:', {
+        page: tableFilters.page,
+        start_date: tableFilters.start_date,
+        end_date: tableFilters.end_date,
+        time_slot: tableFilters.time_slot,
+      });
+      
+      // Check if user is authenticated before fetching
+      const authState = useAuthStore.getState();
+      const { accessToken, refreshToken } = authState;
+      
+      // Only fetch if we have at least a refresh token
+      if (!accessToken && !refreshToken) {
+        console.log('⚠️ No auth tokens, skipping fetch');
+        return null;
+      }
 
-    setTableLoading(true);
-    try {
       const params: any = {
         page: tableFilters.page,
         per_page: 10,
@@ -1068,38 +1074,65 @@ export default function Home() {
         params.time_slot = tableFilters.time_slot;
       }
 
+      console.log('📤 Making API call to fetch table data with params:', params);
       const response = await tokenDataApi.getAll(params);
+      console.log('📥 API response received:', { success: response.success, dataLength: response.data?.length });
       
       if (response.success && response.data) {
-        setTableData(response.data);
-        if (response.pagination) {
-          setTablePagination(response.pagination);
-        }
+        return {
+          data: response.data,
+          pagination: response.pagination,
+        };
       }
-    } catch (error: any) {
-      console.error('Error fetching table data:', error);
-      // If 401, check if auth was cleared (refresh failed)
-      if (error.response?.status === 401) {
+      throw new Error(response.message || 'Failed to fetch table data');
+    },
+    enabled: (() => {
+      const authState = useAuthStore.getState();
+      return !!(authState.accessToken || authState.refreshToken);
+    })(), // Note: This runs once, but query will refetch when filters change
+    retry: 1,
+    staleTime: 0, // Always refetch to get latest data
+  });
+
+  // Update table data and pagination when query data changes
+  useEffect(() => {
+    console.log('📊 Table query data changed:', { 
+      hasData: !!tableQueryData, 
+      dataLength: tableQueryData?.data?.length,
+      isLoading: tableQueryLoading,
+    });
+    if (tableQueryData) {
+      setTableData(tableQueryData.data || []);
+      if (tableQueryData.pagination) {
+        setTablePagination(tableQueryData.pagination);
+      }
+      console.log('✅ Table data updated with', tableQueryData.data?.length || 0, 'records');
+    } else if (tableQueryData === null) {
+      setTableData([]);
+      console.log('🗑️ Table data cleared (null response)');
+    }
+  }, [tableQueryData, tableQueryLoading]);
+
+  // Update loading state
+  useEffect(() => {
+    setTableLoading(tableQueryLoading);
+  }, [tableQueryLoading]);
+
+  // Handle query errors (401 redirect)
+  useEffect(() => {
+    if (tableQueryError) {
+      const error = tableQueryError as any;
+      if (error?.response?.status === 401) {
         const authState = useAuthStore.getState();
-        // If no tokens, redirect to login
         if (!authState.accessToken && !authState.refreshToken) {
           console.log('🔄 No tokens available, redirecting to login...');
           router.push('/login');
-          return;
+        } else {
+          setTableData([]);
         }
-        // Clear table data on auth failure
-        setTableData([]);
       }
-    } finally {
-      setTableLoading(false);
     }
-  };
-
-  // Fetch table data on mount and when filters change
-  useEffect(() => {
-    fetchTableData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tableFilters.page, tableFilters.start_date, tableFilters.end_date, tableFilters.time_slot]);
+  }, [tableQueryError, router]);
 
   const handleFilterChange = (key: string, value: string) => {
     setTableFilters(prev => ({
@@ -1251,30 +1284,8 @@ export default function Home() {
           className: "bg-retro-green border-2 border-retro-dark text-white",
         });
         
-        // Refresh table data
-        const params: any = {
-          page: tableFilters.page,
-          per_page: 10,
-        };
-        
-        if (tableFilters.start_date) {
-          params.start_date = tableFilters.start_date;
-        }
-        if (tableFilters.end_date) {
-          params.end_date = tableFilters.end_date;
-        }
-        if (tableFilters.time_slot) {
-          params.time_slot = tableFilters.time_slot;
-        }
-
-        const refreshResponse = await tokenDataApi.getAll(params);
-        
-        if (refreshResponse.success && refreshResponse.data) {
-          setTableData(refreshResponse.data);
-          if (refreshResponse.pagination) {
-            setTablePagination(refreshResponse.pagination);
-          }
-        }
+        // Refresh table data using query invalidation
+        queryClient.invalidateQueries({ queryKey: ['tokenData'] });
       } else {
         toast({
           title: "❌ Delete Failed",
