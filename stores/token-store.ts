@@ -9,6 +9,7 @@ interface TokenState {
 
   // Actions
   addEntry: (number: number, quantity: number) => void
+  addEntries: (entries: Array<{ number: number; quantity: number }>) => void
   setActiveTab: (tab: ActiveTab) => void
   getTokenSummary: () => TokenSummary[]
   getRecentEntries: (minutes?: number) => TokenEntry[]
@@ -54,6 +55,26 @@ export const useTokenStore = create<TokenState>()(
 
         set((state) => ({
           entries: [...state.entries, newEntry],
+        }))
+      },
+
+      // Add multiple entries with the same timestamp (for batch submissions)
+      addEntries: (entriesToAdd: Array<{ number: number; quantity: number }>) => {
+        const timestamp = Date.now()
+        const newEntries: TokenEntry[] = entriesToAdd.map(({ number, quantity }) => ({
+          number,
+          quantity,
+          timestamp,
+        }))
+
+        console.log('💾 Adding entries to store:', {
+          count: newEntries.length,
+          entries: newEntries.map(e => `#${e.number} (qty: ${e.quantity})`),
+          timestamp
+        })
+
+        set((state) => ({
+          entries: [...state.entries, ...newEntries],
         }))
       },
 

@@ -50,10 +50,60 @@ import {
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { authApi } from "@/lib/api-services";
 
+// Flip-clock digit component with slide animation
+function FlipDigit({ digit, prevDigit }: { digit: number; prevDigit: number }) {
+  const [isAnimating, setIsAnimating] = useState(false);
+  const [displayDigit, setDisplayDigit] = useState(digit);
+
+  useEffect(() => {
+    if (digit !== prevDigit && prevDigit !== undefined) {
+      setIsAnimating(true);
+      // Wait for animation to start, then update digit
+      setTimeout(() => {
+        setDisplayDigit(digit);
+      }, 150); // Half of animation duration
+      // Reset animation after it completes
+      setTimeout(() => {
+        setIsAnimating(false);
+      }, 300);
+    } else if (prevDigit === undefined) {
+      // Initial render
+      setDisplayDigit(digit);
+    }
+  }, [digit, prevDigit]);
+
+  return (
+    <div className="relative w-12 h-16 bg-retro-dark rounded overflow-hidden border-2 border-retro-accent shadow-lg">
+      {/* Top half with current digit */}
+      <div className="absolute inset-0 flex items-center justify-center">
+        <div 
+          className={`w-full h-full flex items-center justify-center text-2xl font-bold text-retro-accent font-mono transition-transform duration-300 ease-in-out ${
+            isAnimating ? 'transform -translate-y-full' : 'transform translate-y-0'
+          }`}
+        >
+          {displayDigit}
+        </div>
+      </div>
+      {/* Bottom half with new digit (only visible during animation) */}
+      {isAnimating && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="w-full h-full flex items-center justify-center text-2xl font-bold text-retro-accent font-mono transform translate-y-full transition-transform duration-300 ease-in-out">
+            {digit}
+          </div>
+        </div>
+      )}
+      {/* Middle divider line */}
+      <div className="absolute top-1/2 left-0 right-0 h-px bg-retro-accent/30 transform -translate-y-1/2 z-10"></div>
+    </div>
+  );
+}
+
 export default function Home() {
   const [tno, setTno] = useState("");
   const [quantity, setQuantity] = useState("");
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [countdown, setCountdown] = useState({ minutes: 0, seconds: 0 });
+  const [prevCountdown, setPrevCountdown] = useState({ minutes: 0, seconds: 0 });
   
   // Refs for auto-focus
   const tnoInputRef = useRef<HTMLInputElement>(null);
@@ -106,6 +156,7 @@ export default function Home() {
   const entries = useTokenStore((state) => state.entries);
   const activeTab = useTokenStore((state) => state.activeTab);
   const addEntry = useTokenStore((state) => state.addEntry);
+  const addEntries = useTokenStore((state) => state.addEntries);
   const setActiveTab = useTokenStore((state) => state.setActiveTab);
   const getTokenSummary = useTokenStore((state) => state.getTokenSummary);
   const getCounts = useTokenStore((state) => state.getCounts);
@@ -184,10 +235,101 @@ export default function Home() {
     return `${displayHours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')} ${ampm}`;
   };
 
-  // Update clock every second
+  // Get current active time slot and calculate countdown
+  const getCurrentActiveSlot = (time: Date): { slot: string; endTime: Date; duration: number } | null => {
+    const slots = generateTimeSlots();
+    const hours = time.getHours();
+    const minutes = time.getMinutes();
+    const seconds = time.getSeconds();
+    const currentTimeMinutes = hours * 60 + minutes;
+    
+    // Find which slot we're currently in
+    for (let i = 0; i < slots.length; i++) {
+      const [slotHour, slotMinute] = slots[i].split(':').map(Number);
+      const slotTimeMinutes = slotHour * 60 + slotMinute;
+      
+      // Check if we're at or past this slot
+      if (currentTimeMinutes >= slotTimeMinutes) {
+        // Check if there's a next slot
+        if (i < slots.length - 1) {
+          const [nextHour, nextMinute] = slots[i + 1].split(':').map(Number);
+          const nextSlotTimeMinutes = nextHour * 60 + nextMinute;
+          
+          // If we're before the next slot, we're in the current slot
+          if (currentTimeMinutes < nextSlotTimeMinutes) {
+            // Calculate end time (start of next slot)
+            const slotEndTime = new Date(time);
+            slotEndTime.setHours(nextHour, nextMinute, 0, 0);
+            // Duration is the difference between slots
+            const duration = nextSlotTimeMinutes - slotTimeMinutes;
+            return { slot: slots[i], endTime: slotEndTime, duration };
+          }
+        } else {
+          // Last slot (21:40) - end at 22:00 (10:00 PM)
+          if (currentTimeMinutes < 22 * 60) {
+            const slotEndTime = new Date(time);
+            slotEndTime.setHours(22, 0, 0, 0);
+            const duration = 20; // Last slot is 20 minutes
+            return { slot: slots[i], endTime: slotEndTime, duration };
+          }
+        }
+      }
+    }
+    
+    // If before first slot (before 9:00 AM), show countdown to first slot
+    if (currentTimeMinutes < 9 * 60) {
+      const firstSlotEndTime = new Date(time);
+      firstSlotEndTime.setHours(9, 0, 0, 0);
+      return { slot: slots[0] || '09:00', endTime: firstSlotEndTime, duration: 15 };
+    }
+    
+    // If after last slot (after 22:00), show countdown to next day's first slot
+    if (currentTimeMinutes >= 22 * 60) {
+      const nextDayFirstSlot = new Date(time);
+      nextDayFirstSlot.setDate(nextDayFirstSlot.getDate() + 1);
+      nextDayFirstSlot.setHours(9, 0, 0, 0);
+      return { slot: 'Next Day 09:00', endTime: nextDayFirstSlot, duration: 15 };
+    }
+    
+    return null;
+  };
+
+  // Update clock and countdown every second
   useEffect(() => {
     const timer = setInterval(() => {
-      setCurrentTime(new Date());
+      const now = new Date();
+      setCurrentTime(now);
+      
+      // Calculate countdown
+      const activeSlot = getCurrentActiveSlot(now);
+      if (activeSlot) {
+        const nowTime = now.getTime();
+        const endTime = activeSlot.endTime.getTime();
+        const remainingMs = endTime - nowTime;
+        
+        if (remainingMs > 0) {
+          const remainingSeconds = Math.floor(remainingMs / 1000);
+          const minutes = Math.floor(remainingSeconds / 60);
+          const seconds = remainingSeconds % 60;
+          
+          // Update previous countdown before setting new one
+          setCountdown(prev => {
+            setPrevCountdown(prev);
+            return { minutes, seconds };
+          });
+        } else {
+          // Slot ended, will update on next interval
+          setCountdown(prev => {
+            setPrevCountdown(prev);
+            return { minutes: 0, seconds: 0 };
+          });
+        }
+      } else {
+        setCountdown(prev => {
+          setPrevCountdown(prev);
+          return { minutes: 0, seconds: 0 };
+        });
+      }
     }, 1000);
     return () => clearInterval(timer);
   }, []);
@@ -924,16 +1066,27 @@ export default function Home() {
     return name.substring(0, 2).toUpperCase();
   };
 
-  // Handle TNO input - only allow numbers 0-9
+  // Handle TNO input - allow multiple digits 0-9, remove duplicates
   const handleTnoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
-    // Only allow single digit numbers (0-9)
-    if (value === "" || /^[0-9]$/.test(value)) {
-      setTno(value);
-      // Auto-focus Quantity field when first digit is entered
-      if (value !== "" && /^[0-9]$/.test(value) && quantityInputRef.current) {
-        quantityInputRef.current.focus();
-      }
+    // Allow multiple digits (0-9) and spaces
+    if (value === "" || /^[0-9\s]*$/.test(value)) {
+      // Remove duplicate digits while preserving order (first occurrence kept)
+      const digits = value.replace(/[^0-9]/g, '').split('');
+      const uniqueDigits: string[] = [];
+      const seen = new Set<number>();
+      
+      digits.forEach((digit) => {
+        const num = Number.parseInt(digit);
+        if (!seen.has(num)) {
+          seen.add(num);
+          uniqueDigits.push(digit);
+        }
+      });
+      
+      // Reconstruct value with unique digits (preserve spaces if they were there)
+      const cleanedValue = uniqueDigits.join('');
+      setTno(cleanedValue);
     }
   };
 
@@ -949,18 +1102,44 @@ export default function Home() {
   const handleRefresh = async () => {
     if (tno === "" || quantity === "") return;
 
-    const num = Number.parseInt(tno);
     const qty = Number.parseInt(quantity);
+    if (qty <= 0) return;
 
-    if (num >= 0 && num <= 9 && qty > 0) {
-      // Normal mode: just add entry
-      addEntry(num, qty);
-      setTno("");
-      setQuantity("");
-      // Reset focus to TNO input after submission
-      if (tnoInputRef.current) {
-        tnoInputRef.current.focus();
-      }
+    // Extract all digits from TNO string (ignore spaces and non-digits)
+    const digits = tno.replace(/[^0-9]/g, '').split('');
+    
+    if (digits.length === 0) return;
+
+    // Create entries array for batch submission (all entries will have same timestamp)
+    const entriesToAdd = digits
+      .map((digitStr) => {
+        const digit = Number.parseInt(digitStr);
+        if (digit >= 0 && digit <= 9) {
+          return { number: digit, quantity: qty };
+        }
+        return null;
+      })
+      .filter((entry): entry is { number: number; quantity: number } => entry !== null);
+
+    // Debug: Log what entries will be created
+    console.log('📝 Creating entries:', {
+      input: tno,
+      digits: digits,
+      entriesToAdd: entriesToAdd,
+      quantity: qty
+    });
+
+    // Add all entries in one batch (same timestamp = same submission)
+    if (entriesToAdd.length > 0) {
+      addEntries(entriesToAdd);
+    }
+
+    // Clear inputs after submission
+    setTno("");
+    setQuantity("");
+    // Reset focus to TNO input after submission
+    if (tnoInputRef.current) {
+      tnoInputRef.current.focus();
     }
   };
 
@@ -980,6 +1159,10 @@ export default function Home() {
     }
     // Allow Ctrl/Cmd + A, C, V, X
     if ((e.ctrlKey || e.metaKey) && ['a', 'c', 'v', 'x'].includes(e.key.toLowerCase())) {
+      return;
+    }
+    // Allow space key for separating digits
+    if (e.key === ' ') {
       return;
     }
     // Only allow numbers 0-9
@@ -1006,17 +1189,13 @@ export default function Home() {
     }
   };
 
-  // Handle paste for TNO - filter to only numbers 0-9
+  // Handle paste for TNO - filter to only numbers 0-9 (allow multiple digits)
   const handleTnoPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
     e.preventDefault();
     const pastedText = e.clipboardData.getData('text');
-    const numericOnly = pastedText.replace(/[^0-9]/g, '').slice(0, 1); // Only first digit
+    const numericOnly = pastedText.replace(/[^0-9]/g, ''); // Keep all digits
     if (numericOnly) {
       setTno(numericOnly);
-      // Auto-focus Quantity field after pasting a digit
-      if (quantityInputRef.current) {
-        quantityInputRef.current.focus();
-      }
     }
   };
 
@@ -1465,18 +1644,58 @@ export default function Home() {
 
       <div className="min-h-screen bg-retro-beige p-4 md:p-8">
       <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-8 flex justify-between items-start">
-          <div>
-            <h1 className="text-4xl font-bold text-retro-dark mb-2">
+        {/* Header - Responsive Grid: 1col (mobile) > 2col (sm) > 3col (md) > 4col (lg) */}
+        <div className="mb-8 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 items-center">
+          {/* Column 1: Site Name - Always visible, centered on mobile */}
+          <div className="flex flex-col items-center sm:items-start lg:justify-center text-center sm:text-left">
+            <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-retro-dark mb-1 sm:mb-2">
               Token Tracker
             </h1>
-            <p className="text-retro-dark/70">
+            <p className="text-xs sm:text-sm text-retro-dark/70">
               Track token frequency over 15 minutes
             </p>
           </div>
-          <div className="text-right flex items-center gap-4">
-            <div className="text-3xl font-bold text-retro-dark font-mono">
+          
+          {/* Column 2: Countdown Timer - Always visible, centered */}
+          <div className="flex flex-col items-center justify-center order-2 sm:order-2 md:order-2 lg:order-2 lg:justify-center">
+            <div className="text-xs text-retro-dark/60 mb-2">Remaining time</div>
+            <div className="flex items-center gap-1">
+              {/* Minutes - Tens */}
+              <FlipDigit 
+                digit={Math.floor(countdown.minutes / 10)} 
+                prevDigit={Math.floor(prevCountdown.minutes / 10)}
+              />
+              {/* Minutes - Ones */}
+              <FlipDigit 
+                digit={countdown.minutes % 10} 
+                prevDigit={prevCountdown.minutes % 10}
+              />
+              {/* Colon */}
+              <div className="text-2xl font-bold text-retro-accent font-mono mx-1">:</div>
+              {/* Seconds - Tens */}
+              <FlipDigit 
+                digit={Math.floor(countdown.seconds / 10)} 
+                prevDigit={Math.floor(prevCountdown.seconds / 10)}
+              />
+              {/* Seconds - Ones */}
+              <FlipDigit 
+                digit={countdown.seconds % 10} 
+                prevDigit={prevCountdown.seconds % 10}
+              />
+            </div>
+          </div>
+          
+          {/* Column 3: Clock Time - Visible from md, separate column on lg, closer to user on desktop */}
+          <div className="hidden md:flex lg:flex items-center justify-end order-3 lg:justify-end lg:pr-2">
+            <div className="text-xl md:text-2xl lg:text-3xl font-bold text-retro-dark font-mono">
+              {formatISTTime(currentTime)}
+            </div>
+          </div>
+          
+          {/* Column 4: User Profile - Always visible, centered on mobile, right-aligned on larger screens */}
+          <div className="flex items-center justify-center sm:justify-end md:justify-end lg:justify-end gap-2 sm:gap-4 order-4">
+            {/* Clock Time - Show on mobile/tablet (1-2col) when clock column is hidden */}
+            <div className="flex md:hidden items-center text-lg sm:text-xl font-bold text-retro-dark font-mono">
               {formatISTTime(currentTime)}
             </div>
             
@@ -1538,9 +1757,8 @@ export default function Home() {
                     onKeyDown={handleTnoKeyDown}
                     onKeyPress={handleKeyPress}
                     onPaste={handleTnoPaste}
-                    placeholder="0-9"
-                    maxLength={1}
-                    pattern="[0-9]"
+                    placeholder="0-9 or multiple digits"
+                    pattern="[0-9\s]*"
                     className="w-full px-4 py-3 bg-white border-3 border-retro-dark text-retro-dark font-bold text-2xl text-center rounded"
                   />
                 </div>
@@ -1665,26 +1883,53 @@ export default function Home() {
                       <p className="text-center text-retro-dark/60 py-8 flex-1 flex items-center justify-center">
                         No entries yet
                       </p>
-                    ) : (
-                      [...entries].reverse().map((entry, idx) => (
+                    ) : (() => {
+                      // Group entries by submission timestamp (entries with same timestamp = same submission)
+                      const groupedEntries: Array<{ timestamp: number; tokens: number[]; quantity: number }> = [];
+                      const sortedEntries = [...entries].sort((a, b) => b.timestamp - a.timestamp);
+                      
+                      sortedEntries.forEach((entry) => {
+                        // Find if there's already a group with this exact timestamp
+                        const existingGroup = groupedEntries.find(
+                          (group) => group.timestamp === entry.timestamp
+                        );
+                        
+                        if (existingGroup) {
+                          // Add token number if not already present (unique tokens only)
+                          if (!existingGroup.tokens.includes(entry.number)) {
+                            existingGroup.tokens.push(entry.number);
+                          }
+                          // Quantity should be the same for all entries in a submission
+                          existingGroup.quantity = entry.quantity;
+                        } else {
+                          // Create new group
+                          groupedEntries.push({
+                            timestamp: entry.timestamp,
+                            tokens: [entry.number],
+                            quantity: entry.quantity,
+                          });
+                        }
+                      });
+                      
+                      return groupedEntries.map((group, idx) => (
                         <div
                           key={idx}
                           className="flex flex-col gap-1 bg-white border-2 border-retro-dark px-3 py-2 rounded"
                         >
                           <div className="flex justify-between items-center">
                             <span className="font-bold text-retro-dark text-lg">
-                              #{entry.number}
+                              {group.tokens.sort((a, b) => a - b).map(t => `#${t}`).join(', ')}
                             </span>
                             <span className="text-retro-accent font-bold text-lg">
-                              ×{entry.quantity}
+                              ×{group.quantity}
                             </span>
                           </div>
                           <span className="text-xs text-retro-dark/60">
-                            {new Date(entry.timestamp).toLocaleTimeString()}
+                            {new Date(group.timestamp).toLocaleTimeString()}
                           </span>
                         </div>
-                      ))
-                    )}
+                      ));
+                    })()}
                   </div>
                 )}
 
