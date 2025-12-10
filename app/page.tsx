@@ -4,6 +4,7 @@ import type React from "react";
 
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import Image from "next/image";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTokenStore } from "@/stores/token-store";
 import { useAuthStore } from "@/stores/auth-store";
@@ -48,6 +49,7 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Switch } from "@/components/ui/switch";
 import { authApi } from "@/lib/api-services";
 
 // Flip-clock digit component with slide animation
@@ -1646,14 +1648,18 @@ export default function Home() {
       <div className="max-w-7xl mx-auto">
         {/* Header - Responsive Grid: 1col (mobile) > 2col (sm) > 3col (md) > 4col (lg) */}
         <div className="mb-8 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 items-center">
-          {/* Column 1: Site Name - Always visible, centered on mobile */}
+          {/* Column 1: Site Logo - Always visible, centered on mobile */}
           <div className="flex flex-col items-center sm:items-start lg:justify-center text-center sm:text-left">
-            <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-retro-dark mb-1 sm:mb-2">
-              Token Tracker
-            </h1>
-            <p className="text-xs sm:text-sm text-retro-dark/70">
-              Track token frequency over 15 minutes
-            </p>
+            <div className="mb-1 sm:mb-2">
+              <Image
+                src="/tt.svg"
+                alt="Token Tracker"
+                width={60}
+                height={18}
+                className="h-auto w-auto max-w-[60px] sm:max-w-[70px] lg:max-w-[80px]"
+                priority
+              />
+            </div>
           </div>
           
           {/* Column 2: Countdown Timer - Always visible, centered */}
@@ -1793,14 +1799,13 @@ export default function Home() {
               </button>
             </div>
 
-            {/* Show Half Quantity Checkbox - For Counter Display */}
+            {/* Show Half Quantity Toggle - For Counter Display */}
             <div className="mb-4 flex items-center gap-2">
-              <input
-                type="checkbox"
+              <Switch
                 id="showHalfQuantityCounter"
                 checked={showHalfQuantityCounter}
-                onChange={(e) => setShowHalfQuantityCounter(e.target.checked)}
-                className="w-4 h-4 border-2 border-retro-dark rounded cursor-pointer"
+                onCheckedChange={setShowHalfQuantityCounter}
+                className="data-[state=checked]:bg-retro-green data-[state=unchecked]:bg-retro-accent"
               />
               <label htmlFor="showHalfQuantityCounter" className="text-sm font-bold text-retro-dark cursor-pointer">
                 Show Half Quantity
@@ -2028,14 +2033,13 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Show Half Quantity Checkbox */}
+            {/* Show Half Quantity Toggle */}
             <div className="mb-4 flex items-center gap-2">
-              <input
-                type="checkbox"
+              <Switch
                 id="showHalfQuantity"
                 checked={showHalfQuantity}
-                onChange={(e) => setShowHalfQuantity(e.target.checked)}
-                className="w-4 h-4 border-2 border-retro-dark rounded cursor-pointer"
+                onCheckedChange={setShowHalfQuantity}
+                className="data-[state=checked]:bg-retro-green data-[state=unchecked]:bg-retro-accent"
               />
               <label htmlFor="showHalfQuantity" className="text-sm font-bold text-retro-dark cursor-pointer">
                 Show Half Quantity
