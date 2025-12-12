@@ -150,9 +150,9 @@ export default function Home() {
   const [editingCounts, setEditingCounts] = useState<Record<number, number>>({});
   
   // Show half quantity toggle - for table
-  const [showHalfQuantity, setShowHalfQuantity] = useState(false);
+  const [showHalfQuantity, setShowHalfQuantity] = useState(true);
   // Show half quantity toggle - for counter display
-  const [showHalfQuantityCounter, setShowHalfQuantityCounter] = useState(false);
+  const [showHalfQuantityCounter, setShowHalfQuantityCounter] = useState(true);
 
   // Zustand store - using direct store access for actions to ensure reactivity
   const entries = useTokenStore((state) => state.entries);
@@ -285,12 +285,10 @@ export default function Home() {
       return { slot: slots[0] || '09:00', endTime: firstSlotEndTime, duration: 15 };
     }
     
-    // If after last slot (after 22:00), show countdown to next day's first slot
+    // If after last slot (after 22:00), don't show countdown (return null)
+    // User only wants countdown for current day's time slots
     if (currentTimeMinutes >= 22 * 60) {
-      const nextDayFirstSlot = new Date(time);
-      nextDayFirstSlot.setDate(nextDayFirstSlot.getDate() + 1);
-      nextDayFirstSlot.setHours(9, 0, 0, 0);
-      return { slot: 'Next Day 09:00', endTime: nextDayFirstSlot, duration: 15 };
+      return null;
     }
     
     return null;
@@ -314,10 +312,14 @@ export default function Home() {
           const minutes = Math.floor(remainingSeconds / 60);
           const seconds = remainingSeconds % 60;
           
+          // Only show countdown if it's within current day's slots (not counting to tomorrow)
+          // Cap minutes at 99 to avoid showing hours
+          const displayMinutes = Math.min(minutes, 99);
+          
           // Update previous countdown before setting new one
           setCountdown(prev => {
             setPrevCountdown(prev);
-            return { minutes, seconds };
+            return { minutes: displayMinutes, seconds };
           });
         } else {
           // Slot ended, will update on next interval
@@ -327,6 +329,7 @@ export default function Home() {
           });
         }
       } else {
+        // No active slot (past all slots for today) - show 00:00
         setCountdown(prev => {
           setPrevCountdown(prev);
           return { minutes: 0, seconds: 0 };
@@ -486,20 +489,20 @@ export default function Home() {
     onSuccess: ({ data, entriesToRemove, showToast, timeSlot }) => {
       console.log("✅ Data saved successfully for time slot:", timeSlot);
       
-      // Remove only the saved entries from store
-      const remainingEntries = useTokenStore.getState().entries.filter(
-        (entry) => !entriesToRemove.some((e) => e.timestamp === entry.timestamp)
-      );
-      useTokenStore.setState({ entries: remainingEntries });
-      console.log("🗑️ Saved entries removed from local storage");
-      
-      // Show success toast notification only for auto-save
-      if (showToast) {
-        toast({
-          title: "✅ Auto-save Successful",
+        // Remove only the saved entries from store
+        const remainingEntries = useTokenStore.getState().entries.filter(
+          (entry) => !entriesToRemove.some((e) => e.timestamp === entry.timestamp)
+        );
+        useTokenStore.setState({ entries: remainingEntries });
+        console.log("🗑️ Saved entries removed from local storage");
+        
+        // Show success toast notification only for auto-save
+        if (showToast) {
+          toast({
+            title: "✅ Auto-save Successful",
           description: `Data saved for time slot ${timeSlot}`,
-          className: "bg-retro-green border-2 border-retro-dark text-white",
-        });
+            className: "bg-retro-green border-2 border-retro-dark text-white",
+          });
       }
       
       // Invalidate and refetch table data - this will automatically refresh the table
@@ -527,7 +530,7 @@ export default function Home() {
   const saveToBackend = async (data: ReturnType<typeof prepareDataForBackend>, entriesToRemove: typeof entries, showToast: boolean = false) => {
     try {
       await saveMutation.mutateAsync({ data, entriesToRemove, showToast });
-      return true;
+        return true;
     } catch (error) {
       return false;
     }
@@ -1137,11 +1140,11 @@ export default function Home() {
     }
 
     // Clear inputs after submission
-    setTno("");
-    setQuantity("");
-    // Reset focus to TNO input after submission
-    if (tnoInputRef.current) {
-      tnoInputRef.current.focus();
+      setTno("");
+      setQuantity("");
+      // Reset focus to TNO input after submission
+      if (tnoInputRef.current) {
+        tnoInputRef.current.focus();
     }
   };
 
@@ -1153,9 +1156,17 @@ export default function Home() {
 
   // Prevent non-numeric keys for TNO input
   const handleTnoKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    // Allow: backspace, delete, tab, escape, enter, and arrow keys
+    // Handle Enter key - move focus to Quantity input
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (quantityInputRef.current) {
+        quantityInputRef.current.focus();
+      }
+      return;
+    }
+    // Allow: backspace, delete, tab, escape, and arrow keys
     if (
-      ['Backspace', 'Delete', 'Tab', 'Escape', 'Enter', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)
+      ['Backspace', 'Delete', 'Tab', 'Escape', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)
     ) {
       return;
     }
@@ -1230,15 +1241,15 @@ export default function Home() {
         time_slot: tableFilters.time_slot,
       });
       
-      // Check if user is authenticated before fetching
-      const authState = useAuthStore.getState();
-      const { accessToken, refreshToken } = authState;
-      
-      // Only fetch if we have at least a refresh token
-      if (!accessToken && !refreshToken) {
+    // Check if user is authenticated before fetching
+    const authState = useAuthStore.getState();
+    const { accessToken, refreshToken } = authState;
+    
+    // Only fetch if we have at least a refresh token
+    if (!accessToken && !refreshToken) {
         console.log('⚠️ No auth tokens, skipping fetch');
         return null;
-      }
+    }
 
       const params: any = {
         page: tableFilters.page,
@@ -1286,7 +1297,7 @@ export default function Home() {
       setTableData(tableQueryData.data || []);
       if (tableQueryData.pagination) {
         setTablePagination(tableQueryData.pagination);
-      }
+        }
       console.log('✅ Table data updated with', tableQueryData.data?.length || 0, 'records');
     } else if (tableQueryData === null) {
       setTableData([]);
@@ -1309,8 +1320,8 @@ export default function Home() {
           console.log('🔄 No tokens available, redirecting to login...');
           router.push('/login');
         } else {
-          setTableData([]);
-        }
+        setTableData([]);
+      }
       }
     }
   }, [tableQueryError, router]);
@@ -1659,7 +1670,7 @@ export default function Home() {
                 className="h-auto w-auto max-w-[60px] sm:max-w-[70px] lg:max-w-[80px]"
                 priority
               />
-            </div>
+          </div>
           </div>
           
           {/* Column 2: Countdown Timer - Always visible, centered */}
@@ -1761,7 +1772,6 @@ export default function Home() {
                     value={tno}
                     onChange={handleTnoChange}
                     onKeyDown={handleTnoKeyDown}
-                    onKeyPress={handleKeyPress}
                     onPaste={handleTnoPaste}
                     placeholder="0-9 or multiple digits"
                     pattern="[0-9\s]*"
